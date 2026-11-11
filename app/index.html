@@ -104,6 +104,8 @@ details.sec>summary{cursor:pointer;font-weight:700;padding:6px 0;color:var(--mut
 .line.off{opacity:.55}
 .line-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
 .calc{font-weight:700;font-variant-numeric:tabular-nums}
+.pchk{display:block;margin-top:4px;padding:6px 10px;border-radius:8px;font-size:13px;font-weight:600}
+.pchk.up{background:var(--warn-soft);color:var(--warn)}.pchk.down{background:var(--good-soft);color:var(--good)}.pchk.odd{background:var(--bad-soft);color:var(--bad)}
 .spinner{width:18px;height:18px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:spin .9s linear infinite;flex:0 0 auto}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spinner{animation-duration:3s}}
@@ -571,6 +573,21 @@ function viewInvoices(){
   return h;
 }
 function calcUnit(l){ const p = parseNum(l.price), q = parseNum(l.packQty) || 1; return isFinite(p) && p >= 0 && q > 0 ? p / q : null; }
+function priceCheck(l){
+  const r = S.review, pu = calcUnit(l);
+  if (!r || pu == null || pu <= 0 || l.productId === "new" || r.supplierId === "new") return null;
+  const p = prodById(l.productId), o = p && (p.offers || []).find(x => x.supplier_id === r.supplierId), ref = o ? Number(o.unit_price) : 0;
+  if (!(ref > 0)) return null;
+  const ratio = pu / ref, pct = Math.round(Math.abs(ratio - 1) * 100), was = eur(ref) + " / " + p.unidade;
+  if (ratio >= 2 || ratio <= 0.5) return {lvl:"odd", txt:`Preço muito diferente do habitual (${was}). Confirme o peso, a embalagem e a unidade.`};
+  if (ratio >= 1.1) return {lvl:"up", txt:`Subiu ${pct}% (antes ${was}).`};
+  if (ratio <= 0.9) return {lvl:"down", txt:`Desceu ${pct}% (antes ${was}).`};
+  return null;
+}
+function calcHtml(l){
+  const pu = calcUnit(l), pc = priceCheck(l);
+  return (pu != null ? esc(eur(pu) + " / " + l.baseUnit) : "Preço por confirmar") + (pc ? `<span class="pchk ${pc.lvl}">${esc(pc.txt)}</span>` : "");
+}
 function blankLine(){ return {include:true, desc:"", code:"", qty:1, price:"", packQty:1, baseUnit:"un", productId:"new", newName:"", category:"Outros"}; }
 function viewReview(){
   const r = S.review;
@@ -583,7 +600,7 @@ function viewReview(){
     <label class="f">Data<input type="date" data-rv="date" value="${esc(r.date)}"></label>
     <label class="f">Total c/ IVA<input data-rv="total" value="${r.total != null && r.total !== "" ? esc(num(r.total)) : ""}" inputmode="decimal"></label>
   </div></div><div class="stack" style="margin-top:12px">`;
-  h += r.lines.map((l, i) => { const pu = calcUnit(l); return `<div class="line ${l.include ? "" : "off"}">
+  h += r.lines.map((l, i) => { return `<div class="line ${l.include ? "" : "off"}">
     <div class="row" style="justify-content:space-between"><label class="f" style="flex:1">Descrição na fatura<input data-ln="${i}" data-f="desc" value="${esc(l.desc)}"></label>
       <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" data-ln="${i}" data-f="include" ${l.include ? "checked" : ""} style="width:auto;min-height:0"> Incluir</label></div>
     <div class="grid2"><label class="f">Produto<select data-ln="${i}" data-f="productId"><option value="new" ${l.productId === "new" ? "selected" : ""}>Novo produto</option>${S.products.map(p => `<option value="${p.id}" ${l.productId === p.id ? "selected" : ""}>${esc(p.nome)}</option>`).join("")}</select></label>
@@ -592,7 +609,7 @@ function viewReview(){
       <label class="f">Preço un. s/ IVA<input data-ln="${i}" data-f="price" value="${esc(l.price === "" ? "" : num(l.price,4))}" inputmode="decimal"></label>
       <label class="f">Qtd. por embalagem<input data-ln="${i}" data-f="packQty" value="${esc(num(l.packQty,3))}" inputmode="decimal"></label>
       <label class="f">Unid. base<select data-ln="${i}" data-f="baseUnit">${UNITS.map(u => `<option ${l.baseUnit === u ? "selected" : ""}>${u}</option>`).join("")}</select></label></div>
-    <div class="calc" id="calc-${i}">${pu != null ? eur(pu) + " / " + esc(l.baseUnit) : "Preço por confirmar"}</div></div>`; }).join("");
+    <div class="calc" id="calc-${i}">${calcHtml(l)}</div></div>`; }).join("");
   return h + `</div><div class="row" style="margin-top:14px"><button data-action="add-line">Adicionar linha</button></div>
     <div class="row" style="margin-top:14px"><button class="primary" data-action="save-invoice" ${S.saving ? "disabled" : ""}>${S.saving ? "A guardar…" : "Guardar fatura e atualizar preços"}</button><button data-action="discard">Descartar</button></div>`;
 }
@@ -671,6 +688,8 @@ async function saveInvoice(){
   if (!lines.length) { toast("Não há linhas para guardar."); return; }
   if (lines.find(l => calcUnit(l) == null || (l.productId === "new" && !String(l.newName).trim()))) { toast("Há linhas sem preço ou sem nome de produto. Corrija ou desmarque “Incluir”."); return; }
   if (r.supplierId === "new" && !String(r.supplierName).trim()) { toast("Falta o nome do fornecedor."); return; }
+  const odd = lines.filter(l => (priceCheck(l) || {}).lvl === "odd");
+  if (odd.length && !confirm(odd.length + (odd.length === 1 ? " linha tem" : " linhas têm") + " um preço muito diferente do habitual:\n\n" + odd.slice(0, 5).map(l => "• " + (l.desc || "(sem descrição)")).join("\n") + "\n\nGuardar mesmo assim?")) return;
   S.saving = true; render();
   try {
     const res = await rpc("compras_save_invoice", {p_token:S.token, p_inv:{
@@ -867,7 +886,7 @@ document.addEventListener("input", ev => {
   if (t.dataset.rv && S.review && t.tagName === "INPUT") { S.review[t.dataset.rv] = t.value; return; }
   if (t.dataset.ln != null && S.review && t.tagName === "INPUT" && t.type !== "checkbox") {
     const l = S.review.lines[+t.dataset.ln]; l[t.dataset.f] = t.value;
-    const c = document.getElementById("calc-" + t.dataset.ln); const pu = calcUnit(l); if (c) c.textContent = pu != null ? eur(pu) + " / " + l.baseUnit : "Preço por confirmar";
+    const c = document.getElementById("calc-" + t.dataset.ln); if (c) c.innerHTML = calcHtml(l);
   }
 });
 document.addEventListener("change", ev => {
