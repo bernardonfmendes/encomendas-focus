@@ -208,6 +208,8 @@ input,select,textarea{font-size:16px!important}
 .chev{flex:0 0 auto;font-size:18px;color:var(--muted);transition:transform .2s}
 .ohead[aria-expanded="true"] .chev{transform:rotate(180deg)}
 .group.closed>header{border-bottom:0}
+.group.ocard{box-shadow:0 3px 12px rgba(31,59,52,.14),0 1px 3px rgba(0,0,0,.08)}
+.group.ocard.closed{box-shadow:0 2px 8px rgba(31,59,52,.12),0 1px 2px rgba(0,0,0,.06)}
 </style>
 </head>
 <body>
@@ -629,7 +631,7 @@ function orderCard(o){
   if (o.status === "enviada" && o.sent_at) h += `<small class="muted">Enviada em ${fmtDT(o.sent_at)}</small>`;
   if (o.status !== "rejeitada") h += `<button class="small" style="align-self:flex-start" data-action="repeat" data-o="${o.id}">↻ Repetir esta encomenda</button>`;
   if (isChefe()) h += `<button class="link" style="align-self:flex-start;color:var(--bad)" data-action="del-order" data-o="${o.id}">${S.confirmDelOrder === o.id ? "Confirmar: apagar encomenda" : "Apagar encomenda"}</button>`;
-  return `<section class="group${open ? "" : " closed"}">${head}${open ? h + `</footer>` : ""}</section>`;
+  return `<section class="group ocard${open ? "" : " closed"}">${head}${open ? h + `</footer>` : ""}</section>`;
 }
 
 // ---------- invoices ----------
