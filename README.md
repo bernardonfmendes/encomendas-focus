@@ -3,6 +3,7 @@
 App de compras do **Focus Sushi & Steak**: os colaboradores escolhem produtos e fornecedores (com preços das últimas faturas), o chefe confirma e envia a encomenda por WhatsApp.
 
 - **App:** https://compras-focus.vercel.app
+- **Instalar no telemóvel:** https://compras-focus.vercel.app/instalar (passos para iPhone e Android, botão de instalar no Android e código QR em `app/qr-instalar.svg`).
 - **Página:** um único ficheiro, `app/index.html` (HTML + CSS + JavaScript, sem build).
 - **Dados:** Supabase, projeto "financas" (`cckgrpmspyurgmbgtjdu`), tabelas `compras_*`.
 - **Notificações (push):** função `supabase/functions/compras-push` (web-push). Chaves de envio geradas na primeira utilização e guardadas em `compras_push_cfg`.

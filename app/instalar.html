@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt-PT">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Instalar Compras Focus</title>
+<meta name="theme-color" content="#1F3B34">
+<meta name="description" content="Instale a app de compras do Focus Sushi & Steak no telemóvel.">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Figtree:wght@400;500;600;700&display=swap">
+<style>
+:root{--bg:#F5F3F0;--surface:#fff;--ink:#17201E;--muted:#5D6865;--line:#E3DFDA;--accent:#BE4A2F;--on-accent:#fff;--nori:#1F3B34;--nori-soft:#E3EDE9;--good:#2E7A4E;--r:14px;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#121816;--surface:#1B2320;--ink:#EDF2F0;--muted:#A5B0AC;--line:#2B3631;--accent:#F08B6D;--on-accent:#1C0F0A;--nori:#A3CDBF;--nori-soft:#1E2E29;--good:#6CC690;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 'Figtree',system-ui,-apple-system,'Segoe UI',sans-serif}
+main{max-width:520px;margin:0 auto;padding:28px 16px calc(32px + env(safe-area-inset-bottom,0px))}
+.logo{width:76px;height:76px;border-radius:18px;display:block;margin:0 auto 14px;box-shadow:0 6px 18px rgba(0,0,0,.18)}
+h1{font:700 26px/1.2 'Bricolage Grotesque','Figtree',sans-serif;text-align:center;margin:0 0 6px}
+.lead{text-align:center;color:var(--muted);margin:0 0 22px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(31,59,52,.08)}
+.card h2{margin:0 0 10px;font-size:17px}
+ol{margin:0;padding-left:0;list-style:none;counter-reset:p}
+ol li{counter-increment:p;display:flex;gap:12px;align-items:flex-start;padding:8px 0}
+ol li::before{content:counter(p);flex:0 0 28px;height:28px;border-radius:50%;background:var(--nori-soft);color:var(--nori);font-weight:700;display:flex;align-items:center;justify-content:center;font-size:14px}
+button.go,a.go{display:flex;width:100%;justify-content:center;align-items:center;min-height:50px;border:0;border-radius:12px;background:var(--accent);color:var(--on-accent);font:700 17px 'Figtree',sans-serif;text-decoration:none;cursor:pointer}
+a.alt{display:block;text-align:center;margin-top:12px;color:var(--muted)}
+.tag{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:2px 8px;background:var(--nori-soft);color:var(--nori);margin-bottom:8px}
+.ok{background:var(--nori-soft);border-radius:12px;padding:12px 14px;margin-top:6px;font-size:15px}
+.qr{display:none;text-align:center}
+.qr img{width:200px;height:200px;border-radius:12px;background:#fff;padding:6px}
+[hidden]{display:none!important}
+kbd{font:inherit;font-weight:700;background:var(--nori-soft);color:var(--nori);border-radius:6px;padding:0 6px}
+@media (min-width:700px){.qr{display:block}}
+</style>
+</head>
+<body>
+<main>
+  <img class="logo" src="/icon-192.png" alt="">
+  <h1>Compras Focus</h1>
+  <p class="lead">Instale a app no ecrã inicial do telemóvel. Abre como uma app normal, sem lojas e sem ocupar espaço.</p>
+
+  <section class="card" id="android" hidden>
+    <span class="tag">Android</span>
+    <h2>Instalar no Android</h2>
+    <button class="go" id="installBtn" hidden>Instalar app</button>
+    <ol id="androidSteps">
+      <li><span>Abra esta página no <b>Chrome</b>.</span></li>
+      <li><span>Toque nos três pontos <kbd>⋮</kbd> no canto de cima.</span></li>
+      <li><span>Escolha <b>Instalar app</b> (ou <b>Adicionar ao ecrã inicial</b>).</span></li>
+    </ol>
+  </section>
+
+  <section class="card" id="ios" hidden>
+    <span class="tag">iPhone</span>
+    <h2>Instalar no iPhone</h2>
+    <ol>
+      <li><span>Abra esta página no <b>Safari</b> (o navegador azul com a bússola).</span></li>
+      <li><span>Toque no botão <b>Partilhar</b> <kbd>⬆︎</kbd>, em baixo no ecrã.</span></li>
+      <li><span>Deslize e escolha <b>Adicionar ao ecrã inicial</b>.</span></li>
+      <li><span>Toque em <b>Adicionar</b>. O ícone aparece no ecrã inicial.</span></li>
+    </ol>
+    <p class="ok" id="iosOther" hidden>Parece que não está no Safari. Copie esta ligação e abra-a no Safari.</p>
+  </section>
+
+  <section class="card qr" id="desktop">
+    <h2>No computador?</h2>
+    <p style="margin:0 0 12px;color:var(--muted)">Aponte a câmara do telemóvel a este código para abrir esta página lá.</p>
+    <img src="/qr-instalar.svg" alt="Código QR para instalar a app">
+  </section>
+
+  <section class="card">
+    <h2>Depois de instalar</h2>
+    <ol>
+      <li><span>Abra a app <b>pelo ícone</b> no ecrã inicial.</span></li>
+      <li><span>Entre com o seu nome e PIN.</span></li>
+      <li><span>Toque no <b>sino</b> 🔔 no topo e aceite, para receber avisos das encomendas.</span></li>
+    </ol>
+  </section>
+
+  <a class="go" href="/">Abrir a app agora</a>
+  <a class="alt" href="/">Já está instalada? Entrar</a>
+</main>
+<script>
+(function(){
+  var ua = navigator.userAgent || "";
+  var ios = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  var android = /android/i.test(ua);
+  var safari = /safari/i.test(ua) && !/crios|fxios|edgios|opios|chrome/i.test(ua);
+  var standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  if (ios) { document.getElementById("ios").hidden = false; document.getElementById("desktop").style.display = "none"; if (!safari) document.getElementById("iosOther").hidden = false; }
+  else if (android) { document.getElementById("android").hidden = false; document.getElementById("desktop").style.display = "none"; }
+  else { document.getElementById("ios").hidden = false; document.getElementById("android").hidden = false; }
+  if (standalone) { var t = document.querySelector(".lead"); t.textContent = "A app já está instalada neste aparelho. É só abri-la pelo ícone."; }
+  var deferred = null, btn = document.getElementById("installBtn");
+  window.addEventListener("beforeinstallprompt", function(e){ e.preventDefault(); deferred = e; btn.hidden = false; document.getElementById("androidSteps").hidden = true; });
+  btn.addEventListener("click", function(){ if (!deferred) return; deferred.prompt(); deferred.userChoice.finally(function(){ deferred = null; btn.hidden = true; document.getElementById("androidSteps").hidden = false; }); });
+  window.addEventListener("appinstalled", function(){ btn.hidden = true; });
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function(){});
+})();
+</script>
+</body>
+</html>
