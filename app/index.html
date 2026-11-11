@@ -201,6 +201,13 @@ input,select,textarea{font-size:16px!important}
 .sumc{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 6px;text-align:center}
 .sumc b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
 .sumc small{color:var(--muted)}
+.ohead{border:0;background:none;width:100%;text-align:left;min-height:0;padding:0;display:flex;gap:10px;align-items:center;justify-content:space-between;color:inherit;font:inherit}
+.ohead .otitle{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.ohead h3{margin:0;font-size:17px;font-weight:800}
+.osum{font-size:14px}
+.chev{flex:0 0 auto;font-size:18px;color:var(--muted);transition:transform .2s}
+.ohead[aria-expanded="true"] .chev{transform:rotate(180deg)}
+.group.closed>header{border-bottom:0}
 </style>
 </head>
 <body>
@@ -295,7 +302,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -593,7 +600,11 @@ function orderCard(o){
   const dirty = !!S.edits[o.id];
   const items = editing ? (S.edits[o.id] || o.items) : o.items;
   const sits = SETORES.filter(([k]) => items.some(it => it.setor === k)).map(x => x[1]).join(" · ");
-  let h = `<section class="group"><header><div><h3>${esc(shortSup(o.fornecedor))}${sits ? `<span class="stag">${esc(sits)}</span>` : ""}</h3><small class="muted">Pedido por ${esc(o.meu ? "si" : (o.criado_por || "—"))} · ${fmtDT(o.created_at)}${o.aprovado_por && o.status !== "pendente" ? " · " + (o.status === "rejeitada" ? "rejeitado" : "aprovado") + " por " + esc(o.aprovado_por) : ""}</small></div>${o.status === "enviada" || o.status === "rejeitada" ? `<span class="status st-${o.status}">${o.status}</span>` : ""}</header><ul class="items">`;
+  const open = !!S.openOrd[o.id] || dirty;
+  const nIt = items.filter(it => Number(it.qty) > 0).length, tot = itemsTotal(items), mn = Number(o.minimo) || 0;
+  const falta = (o.status === "pendente" || o.status === "aprovada") && mn ? mn - tot : 0;
+  const head = `<header><button class="ohead" data-action="toggle-order" data-o="${o.id}" aria-expanded="${open}"><div class="otitle"><h3>${esc(shortSup(o.fornecedor))}${sits ? `<span class="stag">${esc(sits)}</span>` : ""}</h3><small class="muted">Pedido por ${esc(o.meu ? "si" : (o.criado_por || "—"))} · ${fmtDT(o.created_at)}${o.aprovado_por && o.status !== "pendente" ? " · " + (o.status === "rejeitada" ? "rejeitado" : "aprovado") + " por " + esc(o.aprovado_por) : ""}</small><small class="osum">${nIt} ${nIt === 1 ? "artigo" : "artigos"} · <b>${eur(tot)}</b>${falta > 0.005 ? ` · <span class="minw">faltam ${eur(falta)} para o mínimo</span>` : ""}</small></div>${o.status === "enviada" || o.status === "rejeitada" ? `<span class="status st-${o.status}">${o.status}</span>` : ""}<span class="chev" aria-hidden="true">▾</span></button></header>`;
+  let h = `<ul class="items">`;
   const multiS = new Set(items.map(it => it.setor).filter(Boolean)).size > 1;
   h += items.map((it, i) => `<li><div><b>${esc(it.nome)}${multiS && it.setor ? `<span class="stag">${esc(setorNome(it.setor))}</span>` : ""}</b><small>${esc(unitInfo(it.pack_qty, it.base_unit, it.pack_price))}</small></div>
     ${editing ? `<div class="stepper"><button data-action="oq" data-o="${o.id}" data-i="${i}" data-d="-${stepOf(it.pack_qty, it.base_unit)}" aria-label="Menos">−</button><span>${num(it.qty,3)}</span>${qLabel(it.pack_qty, it.base_unit) ? `<span class="qu">${esc(qLabel(it.pack_qty, it.base_unit))}</span>` : ""}<button data-action="oq" data-o="${o.id}" data-i="${i}" data-d="${stepOf(it.pack_qty, it.base_unit)}" aria-label="Mais">+</button></div>` : `<span class="num">${num(it.qty,3)} ${esc(qLabel(it.pack_qty, it.base_unit) || "×")}</span>`}
@@ -618,7 +629,7 @@ function orderCard(o){
   if (o.status === "enviada" && o.sent_at) h += `<small class="muted">Enviada em ${fmtDT(o.sent_at)}</small>`;
   if (o.status !== "rejeitada") h += `<button class="small" style="align-self:flex-start" data-action="repeat" data-o="${o.id}">↻ Repetir esta encomenda</button>`;
   if (isChefe()) h += `<button class="link" style="align-self:flex-start;color:var(--bad)" data-action="del-order" data-o="${o.id}">${S.confirmDelOrder === o.id ? "Confirmar: apagar encomenda" : "Apagar encomenda"}</button>`;
-  return h + `</footer></section>`;
+  return `<section class="group${open ? "" : " closed"}">${head}${open ? h + `</footer>` : ""}</section>`;
 }
 
 // ---------- invoices ----------
@@ -860,6 +871,7 @@ document.addEventListener("click", async ev => {
       if (q <= 0) { const prev = {...S.cart}; delete S.cart[k]; saveCart(); render(); undoToast("Produto retirado.", prev); }
       else { S.cart[k] = q; if (a === "inc") { S.pop = k; try { navigator.vibrate && navigator.vibrate(8); } catch(e){} setTimeout(() => { if (S.pop === k) S.pop = null; }, 500); } saveCart(); render(); } }
     else if (a === "clear-cart") { const prev = {...S.cart}; S.cart = {}; saveCart(); render(); undoToast("Carrinho esvaziado.", prev); }
+    else if (a === "toggle-order") { S.openOrd[b.dataset.o] = !S.openOrd[b.dataset.o]; render(); }
     else if (a === "undo-cart") { if (S.undo) { S.cart = S.undo; S.undo = null; saveCart(); $("#toast").hidden = true; render(); } }
     else if (a === "submit-cart") {
       b.disabled = true;
