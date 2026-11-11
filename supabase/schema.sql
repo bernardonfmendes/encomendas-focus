@@ -46,8 +46,10 @@ create table public.compras_suppliers (
   dias text not null default ''::text,
   created_at timestamp with time zone not null default now(),
   minimo numeric,
+  via text not null default 'numero'::text,
   constraint compras_suppliers_pkey PRIMARY KEY (id),
-  constraint compras_suppliers_minimo_check CHECK (((minimo IS NULL) OR (minimo > (0)::numeric)))
+  constraint compras_suppliers_minimo_check CHECK (((minimo IS NULL) OR (minimo > (0)::numeric))),
+  constraint compras_suppliers_via_check CHECK ((via = ANY (ARRAY['numero'::text, 'grupo'::text])))
 );
 alter table public.compras_suppliers enable row level security;
 
@@ -210,7 +212,7 @@ begin
   u := public.compras__user(p_token);
   return jsonb_build_object(
     'restaurante', (select restaurante from public.compras_settings where id = 1),
-    'suppliers', coalesce((select jsonb_agg(jsonb_build_object('id', s.id, 'nome', s.nome, 'telefone', s.telefone, 'dias', s.dias, 'nif', s.nif, 'minimo', s.minimo) order by lower(s.nome)) from public.compras_suppliers s), '[]'),
+    'suppliers', coalesce((select jsonb_agg(jsonb_build_object('id', s.id, 'nome', s.nome, 'telefone', s.telefone, 'dias', s.dias, 'nif', s.nif, 'minimo', s.minimo, 'via', s.via) order by lower(s.nome)) from public.compras_suppliers s), '[]'),
     'products', coalesce((select jsonb_agg(jsonb_build_object(
         'id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade, 'setores', to_jsonb(p.setores),
         'offers', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'alias', o.alias, 'codigo', o.codigo,
@@ -510,7 +512,7 @@ begin
     'orders', coalesce((select jsonb_agg(t.x order by t.ca desc) from (
        select o.created_at as ca, jsonb_build_object('id', o.id, 'supplier_id', o.supplier_id, 'fornecedor', coalesce(s.nome, o.fornecedor_nome),
          'telefone', case when u.role = 'chefe' then s.telefone else '' end,
-         'minimo', s.minimo, 'items', o.items, 'nota', o.nota, 'status', o.status, 'entrega', o.entrega,
+         'minimo', s.minimo, 'via', s.via, 'items', o.items, 'nota', o.nota, 'status', o.status, 'entrega', o.entrega,
          'criado_por', cu.nome, 'meu', o.created_by = u.id, 'created_at', o.created_at,
          'aprovado_por', au.nome, 'approved_at', o.approved_at, 'sent_at', o.sent_at) as x
          from public.compras_orders o
@@ -618,23 +620,24 @@ begin
   where id = p_id;
 end $function$
 ;
-CREATE OR REPLACE FUNCTION public.compras_save_supplier(p_token text, p_id uuid, p_nome text, p_telefone text, p_dias text, p_nif text, p_minimo numeric DEFAULT NULL::numeric)
+CREATE OR REPLACE FUNCTION public.compras_save_supplier(p_token text, p_id uuid, p_nome text, p_telefone text, p_dias text, p_nif text, p_minimo numeric DEFAULT NULL::numeric, p_via text DEFAULT NULL::text)
  RETURNS uuid
  LANGUAGE plpgsql
  SECURITY DEFINER
  SET search_path TO 'public', 'extensions'
 AS $function$
-declare u public.compras_users; rid uuid;
+declare u public.compras_users; rid uuid; v_via text := case when p_via in ('numero','grupo') then p_via end;
 begin
   u := public.compras__chefe(p_token);
   if coalesce(trim(p_nome),'') = '' then raise exception 'nome_obrigatorio'; end if;
   if p_minimo is not null and p_minimo < 0 then raise exception 'preco_invalido'; end if;
-  -- p_minimo: null = não mexer; 0 = sem mínimo
+  -- p_minimo / p_via: null = não mexer; p_minimo 0 = sem mínimo
   if p_id is null then
-    insert into public.compras_suppliers (nome, telefone, dias, nif, minimo) values (trim(p_nome), coalesce(trim(p_telefone),''), coalesce(trim(p_dias),''), regexp_replace(coalesce(p_nif,''),'\D','','g'), nullif(p_minimo, 0)) returning id into rid;
+    insert into public.compras_suppliers (nome, telefone, dias, nif, minimo, via) values (trim(p_nome), coalesce(trim(p_telefone),''), coalesce(trim(p_dias),''), regexp_replace(coalesce(p_nif,''),'\D','','g'), nullif(p_minimo, 0), coalesce(v_via, 'numero')) returning id into rid;
   else
     update public.compras_suppliers set nome = trim(p_nome), telefone = coalesce(trim(p_telefone),''), dias = coalesce(trim(p_dias),''), nif = regexp_replace(coalesce(p_nif,''),'\D','','g'),
-      minimo = case when p_minimo is null then minimo else nullif(p_minimo, 0) end
+      minimo = case when p_minimo is null then minimo else nullif(p_minimo, 0) end,
+      via = coalesce(v_via, via)
     where id = p_id returning id into rid;
   end if;
   return rid;
