@@ -185,6 +185,22 @@ html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:10
 input,select,textarea{font-size:16px!important}
 .stepper .qin{width:44px;min-height:38px;border:0;border-radius:0;padding:0;text-align:center;font-weight:700;background:transparent;font-variant-numeric:tabular-nums}
 .stepper .qu{font-size:12px;color:var(--muted);margin:0 2px 0 -4px}
+.pico{flex:0 0 auto;width:40px;height:40px;border-radius:12px;background:var(--nori-soft);display:flex;align-items:center;justify-content:center;font-size:21px}
+.pname{font-size:16px}
+.psub b{font-size:15px}
+.pitem.incart{background:var(--nori-soft)}
+.pl.pop .stepper,.pl.pop .addbtn{animation:pop .35s ease-out}
+@keyframes pop{0%{transform:scale(.8)}60%{transform:scale(1.12)}100%{transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.pl.pop .stepper,.pl.pop .addbtn{animation:none}}
+.habh{margin:14px 0 8px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.pbar{height:7px;border-radius:99px;background:var(--line);overflow:hidden}
+.pbar i{display:block;height:100%;background:var(--warn);border-radius:99px;transition:width .3s}
+.pbar.ok i{background:var(--good)}
+.toast button{background:none;border:0;color:inherit;text-decoration:underline;font-weight:700;min-height:0;padding:0 0 0 12px}
+.sumrow{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:4px 0 6px}
+.sumc{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 6px;text-align:center}
+.sumc b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.sumc small{color:var(--muted)}
 </style>
 </head>
 <body>
@@ -214,8 +230,9 @@ input,select,textarea{font-size:16px!important}
     </div>
   </header>
   <div class="wrap">
+    <p class="banner" id="offBanner" hidden role="status">Sem ligação à internet. A mostrar os últimos dados guardados.</p>
     <a class="alert" href="#pedidos" id="pendAlert" hidden></a>
-    <div id="shopbar" hidden><div class="seg" id="sitebar" role="group" aria-label="Para onde é a encomenda"></div><div class="srow"><input id="search" type="search" placeholder="Procurar produto" autocomplete="off" aria-label="Procurar produto"><button id="supBtn" data-action="sup-open" aria-haspopup="dialog"></button></div></div>
+    <div id="shopbar" hidden><div class="seg" id="sitebar" role="group" aria-label="Para onde é a encomenda"></div><div class="srow"><input id="search" type="search" placeholder="Procurar produto" autocomplete="off" aria-label="Procurar produto" list="recentSearches"><datalist id="recentSearches"></datalist><button id="supBtn" data-action="sup-open" aria-haspopup="dialog"></button></div></div>
     <main id="view"></main>
   </div>
   <div class="cartbar" id="cartbar" hidden><div class="wrap"><a href="#carrinho" id="cartlink"></a></div></div>
@@ -230,6 +247,9 @@ const SB = "https://cckgrpmspyurgmbgtjdu.supabase.co";
 const KEY = "sb_publishable_Wx2OTwxuvML3D9D-xcHtpQ_URAzL_vW";
 const CATS = ["Peixe e marisco","Carne","Legumes e fruta","Mercearia","Bebidas","Limpeza e higiene","Descartáveis","Outros"];
 const UNITS = ["un","kg","L"];
+const CAT_ICON = {"Peixe e marisco":"🐟","Carne":"🥩","Legumes e fruta":"🥬","Mercearia":"🥫","Bebidas":"🥤","Limpeza e higiene":"🧽","Descartáveis":"📦","Outros":"🛒"};
+function lev(a, b){ const m = a.length, n = b.length; if (!m) return n; if (!n) return m; let prev = Array.from({length:n + 1}, (_, j) => j);
+  for (let i = 1; i <= m; i++){ const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; }
 const SETORES = [["cozinha","Cozinha"],["sushi","Sushi"],["bar","Bar"],["takeaway","Take away"]];
 const shortSup = n => { const s = String(n || "").split(/\s[-–]\s|,/)[0].replace(/\s+(lda|unip|unipessoal|s\.?a)\.?$/i, "").trim(); return s.length > 22 ? s.slice(0, 21) + "…" : s; };
 const unitInfo = (pq, bu, pp) => Number(pq) !== 1 ? `${packLabel(pq, bu || "un")} · ${eur(pp)}` : `${eur(pp)}/${bu || "un"}`;
@@ -249,6 +269,7 @@ const digits = s => String(s || "").replace(/\D/g, "");
 const ls = {get(k, d){ try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch(e){ return d; } }, set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }, del(k){ try { localStorage.removeItem(k); } catch(e){} }};
 function packLabel(q, bu){ q = Number(q) || 1; return q !== 1 ? "emb. " + num(q, 3) + " " + bu : bu; }
 function waPhone(p){ let d = digits(p); if (d.startsWith("00")) d = d.slice(2); if (d.length === 9) d = "351" + d; return d; }
+function undoToast(msg, prev){ const el = $("#toast"); el.textContent = msg + " "; const b = document.createElement("button"); b.textContent = "Desfazer"; b.dataset.action = "undo-cart"; el.appendChild(b); S.undo = prev; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { el.hidden = true; S.undo = null; }, 6000); }
 let toastT; function toast(t){ const el = $("#toast"); el.textContent = t; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => el.hidden = true, 3800); }
 
 const ERR = {
@@ -262,7 +283,8 @@ const errMsg = e => { const m = (e && e.message) || ""; if (/duplicate key/.test
 async function rpc(fn, args){
   let r;
   try { r = await fetch(SB + "/rest/v1/rpc/" + fn, {method:"POST", headers:{apikey:KEY, "Content-Type":"application/json"}, body:JSON.stringify(args || {})}); }
-  catch(e){ throw new Error("rede"); }
+  catch(e){ S.offline = true; throw new Error("rede"); }
+  S.offline = false;
   const t = await r.text(); let j = null; try { j = t ? JSON.parse(t) : null; } catch(e){}
   if (!r.ok) { const m = (j && j.message) || "erro"; if (m === "sessao_invalida") { endSession(true); } throw new Error(m); }
   return j;
@@ -273,7 +295,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -291,7 +313,7 @@ const itemsTotal = items => items.reduce((t, it) => t + (Number(it.qty)||0) * (N
 // ---------- session ----------
 function endSession(expired){
   if (S.token) rpc("compras_logout", {p_token:S.token}).catch(() => {});
-  S.token = null; S.me = null; ls.del("cf_token");
+  S.token = null; S.me = null; ls.del("cf_token"); ls.del("cf_me"); ls.del("cf_cat");
   $("#appView").hidden = true; $("#loginView").hidden = false;
   if (expired) { const m = $("#lgMsg"); m.textContent = ERR.sessao_invalida; m.hidden = false; }
   try { navigator.clearAppBadge && navigator.clearAppBadge(); } catch(e){}
@@ -309,7 +331,10 @@ $("#loginForm").addEventListener("submit", async ev => {
 });
 
 async function start(){
-  try { S.me = await rpc("compras_me", {p_token:S.token}); } catch(e){ if (e.message !== "sessao_invalida") { $("#loginView").hidden = false; const m = $("#lgMsg"); m.textContent = "Sem ligação. Tente outra vez."; m.hidden = false; } return; }
+  try { S.me = await rpc("compras_me", {p_token:S.token}); ls.set("cf_me", S.me); }
+  catch(e){ const cm = e.message === "rede" ? ls.get("cf_me", null) : null;
+    if (cm) S.me = cm;
+    else { if (e.message !== "sessao_invalida") { $("#loginView").hidden = false; const m = $("#lgMsg"); m.textContent = "Sem ligação. Tente outra vez."; m.hidden = false; } return; } }
   $("#loginView").hidden = true; $("#appView").hidden = false;
   document.querySelectorAll("[data-chefe]").forEach(el => el.hidden = !isChefe());
   $("#who").textContent = S.me.nome;
@@ -328,7 +353,10 @@ async function loadDrafts(){
   clearTimeout(draftTimer);
   if (S.drafts.some(d => d.status === "a_ler")) draftTimer = setTimeout(async () => { const before = S.drafts.filter(d => d.status === "pronta").length; await loadDrafts(); if (S.drafts.filter(d => d.status === "pronta").length > before) toast("Fatura lida. Está pronta a rever."); schedule(); }, 5000);
 }
-async function loadCatalog(){ try { const c = await rpc("compras_catalog", {p_token:S.token}); S.products = c.products || []; S.suppliers = c.suppliers || []; S.me.restaurante = c.restaurante; } catch(e){} }
+async function loadCatalog(){
+  try { const c = await rpc("compras_catalog", {p_token:S.token}); S.products = c.products || []; S.suppliers = c.suppliers || []; S.me.restaurante = c.restaurante; ls.set("cf_cat", c); }
+  catch(e){ if (!S.products.length) { const c = ls.get("cf_cat", null); if (c) { S.products = c.products || []; S.suppliers = c.suppliers || []; S.me.restaurante = c.restaurante; } } }
+}
 async function loadOrders(){
   try {
     const o = await rpc("compras_orders", {p_token:S.token});
@@ -364,6 +392,9 @@ function route(){
   render(); window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", () => { if (S.me) route(); });
+window.addEventListener("online", async () => { if (!S.me) return; await Promise.all([loadCatalog(), loadOrders()]); schedule(); });
+window.addEventListener("offline", () => { S.offline = true; if (S.me) schedule(); });
+if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 
 function chrome(){
   const rn = (S.me && S.me.restaurante) || "";
@@ -375,6 +406,7 @@ function chrome(){
   const dr = S.drafts.filter(d => d.status === "pronta").length; const cd = $("#cntDraft"); cd.hidden = !dr; cd.textContent = dr;
   const al = $("#pendAlert"); al.hidden = !(isChefe() && S.pend && S.view !== "pedidos");
   al.innerHTML = `<span>${S.pend} ${S.pend === 1 ? "encomenda por confirmar" : "encomendas por confirmar"}</span><span>Ver →</span>`;
+  $("#offBanner").hidden = !S.offline;
   $("#shopbar").hidden = S.view !== "encomendar" || !!S.editProd;
   const ents = cartEntries(); const bar = $("#cartbar");
   $("#sitebar").innerHTML = SETORES.map(([k, n]) => { const c = ents.filter(e => e.setor === k).length;
@@ -452,17 +484,30 @@ function viewShop(){
   if (S.cat && !cats.includes(S.cat)) S.cat = "";
   const more = q ? `<div class="row" style="margin-top:14px"></div>` : S.todos ? `<div class="row" style="margin-top:14px"><button class="small" data-action="todos">Mostrar só ${esc(setorNome(S.setor))}</button></div>`
     : `<div class="row" style="margin-top:14px"><button class="small" data-action="todos">Não encontra? Ver todos os produtos (${S.products.length})</button></div>`;
-  const list = base.filter(p => {
-    if (S.cat && (p.categoria || "Outros") !== S.cat) return false;
-    if (!q) return true;
+  const inCat = p => !S.cat || (p.categoria || "Outros") === S.cat;
+  const match = (p, fuzzy) => {
     const hay = norm(p.nome + " " + p.categoria + " " + p.offers.map(o => o.alias).join(" ") + " " + p.offers.map(o => supById(o.supplier_id).nome).join(" "));
-    return q.split(/\s+/).every(w => hay.includes(w));
-  });
+    const words = fuzzy ? hay.split(/[^a-z0-9]+/).filter(Boolean) : null;
+    return q.split(/\s+/).every(w => hay.includes(w) || (fuzzy && w.length >= 4 && words.some(x => Math.min(lev(x, w), lev(x.slice(0, w.length), w)) <= (w.length >= 6 ? 2 : 1))));
+  };
+  let list = base.filter(p => inCat(p) && (!q || match(p, false)));
+  let approx = false;
+  if (q && !list.length) { list = base.filter(p => inCat(p) && match(p, true)); approx = list.length > 0; }
   let h = novo + `<div class="chips" role="group" aria-label="Categorias"><button class="chip" data-action="cat" data-cat="" aria-pressed="${!S.cat}">Todas</button>`
     + cats.map(c => `<button class="chip" data-action="cat" data-cat="${esc(c)}" aria-pressed="${S.cat === c}">${esc(c)}</button>`).join("") + `</div>`;
   const extra = more.replace("</div>", (isChefe() ? `<button class="small" data-action="new-prod">+ Novo produto</button>` : "") + "</div>");
   if (!list.length) return h + `<p class="muted">Nenhum produto encontrado${S.sup ? " deste fornecedor" : ""}.</p>` + extra;
+  const hab = (!q && !S.cat) ? habituals() : [];
+  if (hab.length) h += `<h3 class="habh">Mais pedidos</h3><div class="plist">${hab.map(prodCard).join("")}</div><h3 class="habh">Todos os produtos</h3>`;
+  if (approx) h += `<p class="muted" style="margin:0 0 8px">Resultados parecidos com “${esc(S.search)}”.</p>`;
   return h + `<div class="plist">` + list.map(prodCard).join("") + `</div>` + extra;
+}
+function habituals(){
+  const cnt = {};
+  S.orders.forEach(o => { if (o.status === "rejeitada") return; const seen = new Set();
+    (o.items || []).forEach(it => { if (!it.product_id || !(Number(it.qty) > 0) || seen.has(it.product_id)) return; seen.add(it.product_id); cnt[it.product_id] = (cnt[it.product_id] || 0) + 1; }); });
+  return S.products.filter(p => cnt[p.id] >= 2 && inSite(p) && p.offers.length && (!S.sup || p.offers.some(o => o.supplier_id === S.sup)))
+    .sort((a, b) => cnt[b.id] - cnt[a.id]).slice(0, 5);
 }
 const stepOf = (pq, bu) => (Number(pq) === 1 && bu && bu !== "un") ? 0.5 : 1;
 const qLabel = (pq, bu) => Number(pq) !== 1 ? "emb." : (bu && bu !== "un" ? bu : "");
@@ -477,11 +522,12 @@ function prodCard(p){
     if (o.prev_unit_price && o.unit_price) { const d = (o.unit_price - o.prev_unit_price) / o.prev_unit_price * 100;
       if (d >= 3) ch = ` <span class="tag up">↑${num(d,0)}%</span>`; else if (d <= -3) ch = ` <span class="tag down">↓${num(-d,0)}%</span>`; }
     const isPack = Number(o.pack_qty) !== 1;
-    return `<div class="pl"><div class="pinfo">${main ? `<div class="pname">${esc(p.nome)}${inSite(p) ? "" : `<span class="stag">outro sítio</span>`}${isChefe() ? `<button class="edit" data-action="edit-prod" data-p="${p.id}" aria-label="Editar ${esc(p.nome)}">✎</button>` : ""}</div>` : ""}
+    return `<div class="pl${S.pop === key ? " pop" : ""}">${main ? `<span class="pico" aria-hidden="true">${CAT_ICON[p.categoria] || "🛒"}</span>` : ""}<div class="pinfo">${main ? `<div class="pname">${esc(p.nome)}${inSite(p) ? "" : `<span class="stag">outro sítio</span>`}${isChefe() ? `<button class="edit" data-action="edit-prod" data-p="${p.id}" aria-label="Editar ${esc(p.nome)}">✎</button>` : ""}</div>` : ""}
       <div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}</div></div>
       ${qty ? stepper(key, qty, stepOf(o.pack_qty, bu), qLabel(o.pack_qty, bu)) : `<button class="addbtn" data-action="inc" data-k="${esc(key)}" aria-label="Adicionar ${esc(p.nome)} (${esc(s.nome || "")})">+</button>`}</div>`;
   };
-  let h = `<div class="pitem">` + line(offs[0], true);
+  const inCart = offs.some(o => S.cart[keyOf(o)] > 0);
+  let h = `<div class="pitem${inCart ? " incart" : ""}">` + line(offs[0], true);
   const others = offs.slice(1);
   if (others.length) {
     const forced = others.some(o => S.cart[keyOf(o)]); const open = forced || (S.openAlt || {})[p.id];
@@ -536,7 +582,10 @@ function viewOrders(){
   const g = {pendente:[], aprovada:[], enviada:[], rejeitada:[]}; S.orders.forEach(o => (g[o.status] || g.pendente).push(o));
   const sec = (t, arr, open = true) => !arr.length ? "" : open ? `<h3 class="muted" style="margin-top:6px">${t} (${arr.length})</h3>` + arr.map(orderCard).join("")
     : `<details class="sec"><summary>${t} (${arr.length})</summary><div class="stack">${arr.map(orderCard).join("")}</div></details>`;
-  return `<h2 style="margin-bottom:6px">${isChefe() ? "Pedidos" : "Os meus pedidos"}</h2><div class="stack">`
+  const sentToday = g.enviada.filter(o => o.sent_at && new Date(o.sent_at).toDateString() === new Date().toDateString()).length;
+  const openVal = g.pendente.concat(g.aprovada).reduce((t, o) => t + itemsTotal(o.items), 0);
+  const summary = isChefe() ? `<div class="sumrow"><div class="sumc"><b>${g.pendente.length}</b><small>Por confirmar</small></div><div class="sumc"><b>${g.aprovada.length}</b><small>Por enviar</small></div><div class="sumc"><b>${sentToday}</b><small>Enviadas hoje</small></div></div><small class="muted">Em aberto: ${eur(openVal)} sem IVA</small>` : "";
+  return `<h2 style="margin-bottom:6px">${isChefe() ? "Pedidos" : "Os meus pedidos"}</h2>${summary}<div class="stack">`
     + sec(isChefe() ? "Por confirmar" : "À espera do chefe", g.pendente) + sec("Aprovadas, por enviar", g.aprovada) + sec("Enviadas", g.enviada.slice(0, 40), false) + sec("Rejeitadas", g.rejeitada.slice(0, 40), false) + `</div>`;
 }
 function orderCard(o){
@@ -553,7 +602,8 @@ function orderCard(o){
   if (o.status === "pendente" || o.status === "aprovada") h += minInfo(Number(o.minimo) || 0, itemsTotal(items));
   if (o.nota) h += `<small class="muted">Nota: ${esc(o.nota)}</small>`;
   if (editing && o.status === "pendente") h += `<details class="more2" ${S.deliv[o.id] ? "open" : ""}><summary>+ Data de entrega</summary><input type="date" data-deliv="${o.id}" value="${esc(S.deliv[o.id] || "")}" style="margin-top:8px"></details>
-    <div class="btnrow"><button class="good" data-action="approve" data-o="${o.id}">Confirmar</button><button class="danger" data-action="reject" data-o="${o.id}">Rejeitar</button></div>`;
+    <button class="primary full" data-action="approve-send" data-o="${o.id}">Confirmar e enviar</button>
+    <div class="btnrow"><button class="good" data-action="approve" data-o="${o.id}">Só confirmar</button><button class="danger" data-action="reject" data-o="${o.id}">Rejeitar</button></div>`;
   else if (o.status === "pendente" && o.meu) h += `<div class="row"><button class="small danger" data-action="cancel" data-o="${o.id}">Cancelar pedido</button></div>`;
   if (editing && o.status === "aprovada" && dirty) h += `<p class="banner" style="margin:0">Alterou quantidades. Guarde antes de enviar ao fornecedor (quantidade 0 retira o produto).</p>
     <div class="row"><button class="good" data-action="save-items" data-o="${o.id}">Guardar alterações</button><button data-action="undo-items" data-o="${o.id}">Desfazer</button></div>`;
@@ -566,6 +616,7 @@ function orderCard(o){
       + `<button class="good full" data-action="sent" data-o="${o.id}">Já enviei · marcar como enviada</button>`;
   }
   if (o.status === "enviada" && o.sent_at) h += `<small class="muted">Enviada em ${fmtDT(o.sent_at)}</small>`;
+  if (o.status !== "rejeitada") h += `<button class="small" style="align-self:flex-start" data-action="repeat" data-o="${o.id}">↻ Repetir esta encomenda</button>`;
   if (isChefe()) h += `<button class="link" style="align-self:flex-start;color:var(--bad)" data-action="del-order" data-o="${o.id}">${S.confirmDelOrder === o.id ? "Confirmar: apagar encomenda" : "Apagar encomenda"}</button>`;
   return h + `</footer></section>`;
 }
@@ -787,8 +838,9 @@ const minVal = id => { const v = parseNum(val(id)); if (String(val(id)).trim() &
 function minInfo(minimo, total){
   if (!minimo) return "";
   const f = minimo - total;
-  return f > 0.005 ? `<small class="minw">Mínimo de entrega ${eur(minimo)} · faltam ${eur(f)}</small>`
-    : `<small class="oki">✓ Mínimo de entrega atingido (${eur(minimo)})</small>`;
+  const bar = `<div class="pbar ${f > 0.005 ? "" : "ok"}" role="progressbar" aria-valuemin="0" aria-valuemax="${minimo}" aria-valuenow="${Math.min(total, minimo)}"><i style="width:${Math.max(0, Math.min(100, total / minimo * 100))}%"></i></div>`;
+  return bar + (f > 0.005 ? `<small class="minw">Mínimo de entrega ${eur(minimo)} · faltam ${eur(f)}</small>`
+    : `<small class="oki">✓ Mínimo de entrega atingido (${eur(minimo)})</small>`);
 }
 document.addEventListener("click", ev => { if (ev.target.id === "supModal") { S.supOpen = false; render(); } });
 document.addEventListener("keydown", ev => { if (ev.key === "Escape" && S.supOpen) { S.supOpen = false; render(); } });
@@ -803,8 +855,12 @@ document.addEventListener("click", async ev => {
     else if (a === "setor") { S.setor = b.dataset.s; ls.set("cf_setor", S.setor); S.todos = false; S.cat = ""; render(); window.scrollTo(0, 0); }
     else if (a === "alt") { S.openAlt = S.openAlt || {}; S.openAlt[b.dataset.p] = !S.openAlt[b.dataset.p]; render(); }
     else if (a === "todos") { S.todos = !S.todos; S.cat = ""; render(); }
-    else if (a === "inc" || a === "dec") { const k = b.dataset.k; const st = Number(b.dataset.st) || 1; const q = Math.round(((S.cart[k] || 0) + (a === "inc" ? st : -st)) * 1000) / 1000; if (q <= 0) delete S.cart[k]; else S.cart[k] = q; saveCart(); render(); }
-    else if (a === "clear-cart") { S.cart = {}; saveCart(); render(); }
+    else if (a === "inc" || a === "dec") { const k = b.dataset.k; const st = Number(b.dataset.st) || 1; const q = Math.round(((S.cart[k] || 0) + (a === "inc" ? st : -st)) * 1000) / 1000;
+      S.pop = null;
+      if (q <= 0) { const prev = {...S.cart}; delete S.cart[k]; saveCart(); render(); undoToast("Produto retirado.", prev); }
+      else { S.cart[k] = q; if (a === "inc") { S.pop = k; try { navigator.vibrate && navigator.vibrate(8); } catch(e){} setTimeout(() => { if (S.pop === k) S.pop = null; }, 500); } saveCart(); render(); } }
+    else if (a === "clear-cart") { const prev = {...S.cart}; S.cart = {}; saveCart(); render(); undoToast("Carrinho esvaziado.", prev); }
+    else if (a === "undo-cart") { if (S.undo) { S.cart = S.undo; S.undo = null; saveCart(); $("#toast").hidden = true; render(); } }
     else if (a === "submit-cart") {
       b.disabled = true;
       const items = cartEntries().map(e => ({product_id:e.pid, supplier_id:e.sid, qty:e.qty, setor:e.setor}));
@@ -821,6 +877,25 @@ document.addEventListener("click", async ev => {
       if (a === "approve" && !items.length) { toast("A encomenda ficou sem artigos. Rejeite-a."); b.disabled = false; return; }
       await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:a === "approve" ? "aprovada" : "rejeitada", p_items:items, p_entrega:S.deliv[o.id] || null});
       delete S.edits[o.id]; await loadOrders(); render(); toast(a === "approve" ? "Confirmada. Envie-a ao fornecedor." : "Pedido rejeitado.");
+    }
+    else if (a === "approve-send") {
+      b.disabled = true; const o = S.orders.find(x => x.id === b.dataset.o);
+      const items = (S.edits[o.id] || o.items).filter(x => Number(x.qty) > 0);
+      if (!items.length) { toast("A encomenda ficou sem artigos. Rejeite-a."); b.disabled = false; return; }
+      const entrega = S.deliv[o.id] || null;
+      await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:"aprovada", p_items:items, p_entrega:entrega});
+      const msg = waMessage({...o, entrega: entrega || o.entrega}, items), ph = waPhone(o.telefone);
+      delete S.edits[o.id]; await loadOrders(); render();
+      if (o.via === "grupo" && navigator.share) { try { await navigator.share({text: msg}); toast("Confirmada. Depois de enviar, marque como enviada."); } catch(e){ toast("Confirmada. Toque em Partilhar no grupo para enviar."); } }
+      else if (ph) { toast("Confirmada. A abrir o WhatsApp. Depois marque como enviada."); setTimeout(() => { location.href = "https://wa.me/" + ph + "?text=" + encodeURIComponent(msg); }, 700); }
+      else toast("Confirmada. Falta o número do fornecedor para enviar.");
+    }
+    else if (a === "repeat") {
+      const o = S.orders.find(x => x.id === b.dataset.o); let n = 0, miss = 0;
+      (o.items || []).forEach(it => { const q = Number(it.qty) || 0; if (!(q > 0)) return; const p = it.product_id && prodById(it.product_id); const of = p && p.offers.find(x => x.supplier_id === o.supplier_id);
+        if (!of) { miss++; return; } const k = p.id + "|" + o.supplier_id + "|" + (it.setor || S.setor); S.cart[k] = S.cart[k] || q; n++; });
+      if (!n) { toast("Esses produtos já não estão disponíveis."); return; }
+      saveCart(); location.hash = "#carrinho"; toast(n + (n === 1 ? " produto no carrinho" : " produtos no carrinho") + (miss ? " · " + miss + " já não disponíveis" : "") + ".");
     }
     else if (a === "sent") { b.disabled = true; await rpc("compras_order_decide", {p_token:S.token, p_id:b.dataset.o, p_status:"enviada", p_items:null, p_entrega:null}); await loadOrders(); render(); toast("Marcada como enviada."); }
     else if (a === "edit-prod") { S.editProd = b.dataset.p; S.confirmDel = null; S.confirmDelOff = null; render(); window.scrollTo(0, 0); }
@@ -928,12 +1003,15 @@ document.addEventListener("input", ev => {
 document.addEventListener("change", ev => {
   const t = ev.target;
   if (t.id === "files") { const arr = [...t.files].slice(0, 5); S.previews.forEach(u => u && URL.revokeObjectURL(u)); S.files = arr; S.previews = arr.map(f => f.type === "application/pdf" ? null : URL.createObjectURL(f)); S.readMsg = t.files.length > 5 ? "Só os primeiros 5 ficheiros serão lidos." : ""; render(); return; }
-  if (t.classList.contains("qin")) { const st = Number(t.dataset.st) || 1; let v = parseNum(t.value); if (isFinite(v) && st >= 1) v = Math.round(v); if (isFinite(v) && v > 0) S.cart[t.dataset.k] = Math.round(v * 1000) / 1000; else delete S.cart[t.dataset.k]; saveCart(); render(); return; }
+  if (t.classList.contains("qin")) { const st = Number(t.dataset.st) || 1; let v = parseNum(t.value); if (isFinite(v) && st >= 1) v = Math.round(v); if (isFinite(v) && v > 0) { S.cart[t.dataset.k] = Math.round(v * 1000) / 1000; saveCart(); render(); } else { const prev = {...S.cart}; delete S.cart[t.dataset.k]; saveCart(); render(); undoToast("Produto retirado.", prev); } return; }
+  if (t.id === "search") { const v = t.value.trim(); if (v.length >= 2) { const r = [v, ...ls.get("cf_recent", []).filter(x => x !== v)].slice(0, 6); ls.set("cf_recent", r); fillRecent(); } return; }
   if (t.dataset.deliv) { S.deliv[t.dataset.deliv] = t.value; return; }
   if (t.dataset.rv && S.review) { S.review[t.dataset.rv] = t.value; if (t.dataset.rv === "supplierId") render(); return; }
   if (t.dataset.ln != null && S.review) { const l = S.review.lines[+t.dataset.ln]; l[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value; if (["productId","include","baseUnit"].includes(t.dataset.f)) render(); }
 });
 
+function fillRecent(){ const d = document.getElementById("recentSearches"); if (d) d.innerHTML = ls.get("cf_recent", []).map(x => `<option value="${esc(x)}">`).join(""); }
+fillRecent();
 // ---------- boot ----------
 if (S.token) start(); else $("#loginView").hidden = false;
 })();
