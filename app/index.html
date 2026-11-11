@@ -581,7 +581,7 @@ function waMessage(o, items){
     const qs = (pq === 1 && bu !== "un") ? num(q, 3) + " " + bu : num(q, 2) + " ×";
     return "- " + qs + " " + (it.alias || it.nome) + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (it.codigo ? " (ref. " + it.codigo + ")" : "");
   }).join("\n");
-  let m = "Bom dia! Encomenda do " + ((S.me && S.me.restaurante) || "restaurante") + ":\n" + lines;
+  let m = "Olá! Encomenda do " + ((S.me && S.me.restaurante) || "restaurante") + ":\n" + lines;
   if (o.entrega) m += "\n\nEntrega: " + new Date(o.entrega + "T12:00:00").toLocaleDateString("pt-PT", {weekday:"long", day:"numeric", month:"long"});
   if (o.nota) m += "\nNota: " + o.nota;
   return m + "\n\nObrigado.";
