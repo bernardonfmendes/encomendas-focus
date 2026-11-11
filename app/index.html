@@ -572,6 +572,7 @@ function cartMin(sid, tot){
 }
 
 // ---------- orders ----------
+function saudacao(d = new Date()){ const h = d.getHours(); return h >= 5 && h < 12 ? "Bom dia" : h >= 12 && h < 19 ? "Boa tarde" : "Boa noite"; }
 function waMessage(o, items){
   // ao fornecedor vai o total por produto (soma dos sítios)
   const agg = [], by = {};
@@ -581,7 +582,7 @@ function waMessage(o, items){
     const qs = (pq === 1 && bu !== "un") ? num(q, 3) + " " + bu : num(q, 2) + " ×";
     return "- " + qs + " " + (it.alias || it.nome) + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (it.codigo ? " (ref. " + it.codigo + ")" : "");
   }).join("\n");
-  let m = "Olá! Encomenda do " + ((S.me && S.me.restaurante) || "restaurante") + ":\n" + lines;
+  let m = saudacao() + "! Encomenda do " + ((S.me && S.me.restaurante) || "restaurante") + ":\n" + lines;
   if (o.entrega) m += "\n\nEntrega: " + new Date(o.entrega + "T12:00:00").toLocaleDateString("pt-PT", {weekday:"long", day:"numeric", month:"long"});
   if (o.nota) m += "\nNota: " + o.nota;
   return m + "\n\nObrigado.";
