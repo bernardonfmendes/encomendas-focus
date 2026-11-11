@@ -210,6 +210,10 @@ input,select,textarea{font-size:16px!important}
 .group.closed>header{border-bottom:0}
 .group.ocard{box-shadow:0 3px 12px rgba(31,59,52,.14),0 1px 3px rgba(0,0,0,.08)}
 .group.ocard.closed{box-shadow:0 2px 8px rgba(31,59,52,.12),0 1px 2px rgba(0,0,0,.06)}
+.bell{border:0;background:none;min-height:30px;padding:2px 6px;color:var(--muted);display:inline-flex;align-items:center}
+.bell svg{width:20px;height:20px}
+.bell[aria-pressed="true"]{color:var(--accent)}
+.rej{color:var(--bad);font-weight:600;font-size:14px}
 </style>
 </head>
 <body>
@@ -228,7 +232,7 @@ input,select,textarea{font-size:16px!important}
   <header class="top">
     <div class="wrap">
       <div class="brand"><h1 id="rname">Compras</h1>
-        <div class="menu"><span id="who"></span><button class="link" data-action="pin-form">PIN</button><button class="link" data-action="logout">Sair</button></div></div>
+        <div class="menu"><span id="who"></span><button class="bell" id="bellBtn" data-action="push-toggle" aria-pressed="false" aria-label="Notificações" title="Notificações"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button><button class="link" data-action="pin-form">PIN</button><button class="link" data-action="logout">Sair</button></div></div>
       <nav class="tabs" aria-label="Secções">
         <a href="#encomendar" data-view="encomendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Encomendar</a>
         <a href="#carrinho" data-view="carrinho"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 12.4a1 1 0 0 0 1 .8h9.8a1 1 0 0 0 1-.8L21 7H6"/></svg>Carrinho <span class="count" id="cntCart" hidden></span></a>
@@ -285,6 +289,7 @@ const ERR = {
   sessao_invalida:"A sessão terminou. Entre outra vez.", sem_permissao:"Só o chefe pode fazer isto.", pin_errado:"O PIN atual está errado.",
   pin_formato:"O PIN tem de ter exatamente 6 números.", nome_obrigatorio:"Falta o nome.", nao_pode_proprio:"Não pode tirar a si próprio o acesso de chefe.",
   carrinho_vazio:"O carrinho está vazio.", preco_invalido:"Preço inválido.", estado_invalido:"Ação inválida.", login_invalido:"Nome ou PIN errados.",
+  motivo_obrigatorio:"Escreva o motivo da rejeição (pelo menos 3 letras).", subscricao_invalida:"Não deu para ativar as notificações. Tente outra vez.",
   bloqueado:"Demasiadas tentativas. Espere 15 minutos ou peça ao chefe para repor o PIN."
 };
 const errMsg = e => { const m = (e && e.message) || ""; if (/duplicate key/.test(m)) return "Já existe alguém com esse nome."; return ERR[m] || "Algo correu mal. Tente outra vez."; };
@@ -304,7 +309,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:""
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -318,6 +323,40 @@ function cartEntries(){
   }).filter(Boolean);
 }
 const itemsTotal = items => items.reduce((t, it) => t + (Number(it.qty)||0) * (Number(it.pack_price)||0), 0);
+
+// ---------- notificações ----------
+const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+async function pushCall(evento, extra){
+  const r = await fetch(SB + "/functions/v1/compras-push", {method:"POST", headers:{apikey:KEY, "Content-Type":"application/json"}, body:JSON.stringify({token:S.token, evento, ...(extra || {})})});
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || "erro"); return j;
+}
+const pushNotify = (evento, extra) => { pushCall(evento, extra).catch(() => {}); };
+const keyBytes = s => { const raw = atob((s + "=".repeat((4 - s.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/")); return Uint8Array.from([...raw].map(c => c.charCodeAt(0))); };
+async function pushState(){
+  if (!pushSupported()) { S.push = "nosup"; return; }
+  if (Notification.permission === "denied") { S.push = "denied"; return; }
+  try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription(); S.push = sub ? "on" : "off";
+    if (sub) rpc("compras_push_save", {p_token:S.token, p_sub:sub.toJSON()}).catch(() => {}); } catch(e){ S.push = "off"; }
+}
+async function pushEnable(){
+  if (!pushSupported()) { toast(isIOS ? "No iPhone, primeiro instale a app: Partilhar › Adicionar ao ecrã inicial. Depois abra-a por lá." : "Este navegador não suporta notificações."); return; }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { S.push = perm === "denied" ? "denied" : "off"; toast("Notificações não permitidas. Pode ativá-las nas definições do telemóvel."); return; }
+  const { chave } = await pushCall("chave");
+  const reg = await navigator.serviceWorker.ready;
+  const subscribe = () => reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:keyBytes(chave)});
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await subscribe();
+  else { try { const k = sub.options && sub.options.applicationServerKey; if (k && btoa(String.fromCharCode(...new Uint8Array(k))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") !== chave) { await sub.unsubscribe(); sub = await subscribe(); } } catch(e){} }
+  await rpc("compras_push_save", {p_token:S.token, p_sub:sub.toJSON()});
+  S.push = "on"; toast("Notificações ativadas. Vai receber um aviso de teste."); pushNotify("teste");
+}
+async function pushDisable(){
+  try { const reg = await navigator.serviceWorker.ready; const sub = await reg.pushManager.getSubscription();
+    if (sub) { const ep = sub.endpoint; await sub.unsubscribe(); await rpc("compras_push_delete", {p_token:S.token, p_endpoint:ep}).catch(() => {}); } } catch(e){}
+  S.push = "off"; toast("Notificações desativadas neste aparelho.");
+}
 
 // ---------- session ----------
 function endSession(expired){
@@ -354,6 +393,7 @@ async function start(){
   await Promise.all([loadCatalog(), loadOrders()]);
   if (isChefe()) { loadInvoices(); await loadDrafts(); }
   route();
+  pushState().then(schedule);
 }
 let draftTimer = null;
 async function loadDrafts(){
@@ -415,6 +455,7 @@ function chrome(){
   const dr = S.drafts.filter(d => d.status === "pronta").length; const cd = $("#cntDraft"); cd.hidden = !dr; cd.textContent = dr;
   const al = $("#pendAlert"); al.hidden = !(isChefe() && S.pend && S.view !== "pedidos");
   al.innerHTML = `<span>${S.pend} ${S.pend === 1 ? "encomenda por confirmar" : "encomendas por confirmar"}</span><span>Ver →</span>`;
+  const bb = $("#bellBtn"); bb.setAttribute("aria-pressed", String(S.push === "on")); bb.title = S.push === "on" ? "Notificações ativas (tocar para desativar)" : "Ativar notificações";
   $("#offBanner").hidden = !S.offline;
   $("#shopbar").hidden = S.view !== "encomendar" || !!S.editProd;
   const ents = cartEntries(); const bar = $("#cartbar");
@@ -596,7 +637,7 @@ function viewOrders(){
   const openVal = g.pendente.concat(g.aprovada).reduce((t, o) => t + itemsTotal(o.items), 0);
   const summary = isChefe() ? `<div class="sumrow"><div class="sumc"><b>${g.pendente.length}</b><small>Por confirmar</small></div><div class="sumc"><b>${g.aprovada.length}</b><small>Por enviar</small></div><div class="sumc"><b>${sentToday}</b><small>Enviadas hoje</small></div></div><small class="muted">Em aberto: ${eur(openVal)} sem IVA</small>` : "";
   return `<h2 style="margin-bottom:6px">${isChefe() ? "Pedidos" : "Os meus pedidos"}</h2>${summary}<div class="stack">`
-    + sec(isChefe() ? "Por confirmar" : "À espera do chefe", g.pendente) + sec("Aprovadas, por enviar", g.aprovada) + sec("Enviadas", g.enviada.slice(0, 40), false) + sec("Rejeitadas", g.rejeitada.slice(0, 40), false) + `</div>`;
+    + sec(isChefe() ? "Por confirmar" : "À espera do chefe", g.pendente) + sec("Aprovadas, por enviar", g.aprovada) + sec("Enviadas", g.enviada.slice(0, 40), false) + sec("Rejeitadas", g.rejeitada.slice(0, 40), !isChefe()) + `</div>`;
 }
 function orderCard(o){
   const editing = isChefe() && (o.status === "pendente" || o.status === "aprovada");
@@ -606,7 +647,7 @@ function orderCard(o){
   const open = !!S.openOrd[o.id] || dirty;
   const nIt = items.filter(it => Number(it.qty) > 0).length, tot = itemsTotal(items), mn = Number(o.minimo) || 0;
   const falta = (o.status === "pendente" || o.status === "aprovada") && mn ? mn - tot : 0;
-  const head = `<header><button class="ohead" data-action="toggle-order" data-o="${o.id}" aria-expanded="${open}"><div class="otitle"><h3>${esc(shortSup(o.fornecedor))}${sits ? `<span class="stag">${esc(sits)}</span>` : ""}</h3><small class="muted">Pedido por ${esc(o.meu ? "si" : (o.criado_por || "—"))} · ${fmtDT(o.created_at)}${o.aprovado_por && o.status !== "pendente" ? " · " + (o.status === "rejeitada" ? "rejeitado" : "aprovado") + " por " + esc(o.aprovado_por) : ""}</small><small class="osum">${nIt} ${nIt === 1 ? "artigo" : "artigos"} · <b>${eur(tot)}</b>${falta > 0.005 ? ` · <span class="minw">faltam ${eur(falta)} para o mínimo</span>` : ""}</small></div>${o.status === "enviada" || o.status === "rejeitada" ? `<span class="status st-${o.status}">${o.status}</span>` : ""}<span class="chev" aria-hidden="true">▾</span></button></header>`;
+  const head = `<header><button class="ohead" data-action="toggle-order" data-o="${o.id}" aria-expanded="${open}"><div class="otitle"><h3>${esc(shortSup(o.fornecedor))}${sits ? `<span class="stag">${esc(sits)}</span>` : ""}</h3><small class="muted">Pedido por ${esc(o.meu ? "si" : (o.criado_por || "—"))} · ${fmtDT(o.created_at)}${o.aprovado_por && o.status !== "pendente" ? " · " + (o.status === "rejeitada" ? "rejeitado" : "aprovado") + " por " + esc(o.aprovado_por) : ""}</small>${o.status === "rejeitada" && o.motivo ? `<small class="rej">Motivo: ${esc(o.motivo)}</small>` : ""}<small class="osum">${nIt} ${nIt === 1 ? "artigo" : "artigos"} · <b>${eur(tot)}</b>${falta > 0.005 ? ` · <span class="minw">faltam ${eur(falta)} para o mínimo</span>` : ""}</small></div>${o.status === "enviada" || o.status === "rejeitada" ? `<span class="status st-${o.status}">${o.status}</span>` : ""}<span class="chev" aria-hidden="true">▾</span></button></header>`;
   let h = `<ul class="items">`;
   const multiS = new Set(items.map(it => it.setor).filter(Boolean)).size > 1;
   h += items.map((it, i) => `<li><div><b>${esc(it.nome)}${multiS && it.setor ? `<span class="stag">${esc(setorNome(it.setor))}</span>` : ""}</b><small>${esc(unitInfo(it.pack_qty, it.base_unit, it.pack_price))}</small></div>
@@ -616,8 +657,10 @@ function orderCard(o){
   if (o.status === "pendente" || o.status === "aprovada") h += minInfo(Number(o.minimo) || 0, itemsTotal(items));
   if (o.nota) h += `<small class="muted">Nota: ${esc(o.nota)}</small>`;
   if (editing && o.status === "pendente") h += `<details class="more2" ${S.deliv[o.id] ? "open" : ""}><summary>+ Data de entrega</summary><input type="date" data-deliv="${o.id}" value="${esc(S.deliv[o.id] || "")}" style="margin-top:8px"></details>
-    <button class="primary full" data-action="approve-send" data-o="${o.id}">Confirmar e enviar</button>
-    <div class="btnrow"><button class="good" data-action="approve" data-o="${o.id}">Só confirmar</button><button class="danger" data-action="reject" data-o="${o.id}">Rejeitar</button></div>`;
+    ${S.rejecting === o.id ? `<div class="stack"><label class="f">Motivo da rejeição (o colaborador vai ver)<textarea id="rej-${o.id}" maxlength="300" placeholder="Ex.: pedido repetido; já temos em stock; quantidade exagerada">${esc(S.rejText || "")}</textarea></label>
+      <div class="btnrow"><button class="danger" data-action="reject-confirm" data-o="${o.id}">Rejeitar encomenda</button><button data-action="reject-cancel">Cancelar</button></div></div>`
+    : `<button class="primary full" data-action="approve-send" data-o="${o.id}">Confirmar e enviar</button>
+    <div class="btnrow"><button class="good" data-action="approve" data-o="${o.id}">Só confirmar</button><button class="danger" data-action="reject" data-o="${o.id}">Rejeitar</button></div>`}`;
   else if (o.status === "pendente" && o.meu) h += `<div class="row"><button class="small danger" data-action="cancel" data-o="${o.id}">Cancelar pedido</button></div>`;
   if (editing && o.status === "aprovada" && dirty) h += `<p class="banner" style="margin:0">Alterou quantidades. Guarde antes de enviar ao fornecedor (quantidade 0 retira o produto).</p>
     <div class="row"><button class="good" data-action="save-items" data-o="${o.id}">Guardar alterações</button><button data-action="undo-items" data-o="${o.id}">Desfazer</button></div>`;
@@ -874,6 +917,16 @@ document.addEventListener("click", async ev => {
       if (q <= 0) { const prev = {...S.cart}; delete S.cart[k]; saveCart(); render(); undoToast("Produto retirado.", prev); }
       else { S.cart[k] = q; if (a === "inc") { S.pop = k; try { navigator.vibrate && navigator.vibrate(8); } catch(e){} setTimeout(() => { if (S.pop === k) S.pop = null; }, 500); } saveCart(); render(); } }
     else if (a === "clear-cart") { const prev = {...S.cart}; S.cart = {}; saveCart(); render(); undoToast("Carrinho esvaziado.", prev); }
+    else if (a === "push-toggle") { b.disabled = true; try { S.push === "on" ? await pushDisable() : await pushEnable(); } catch(e){ toast("Não deu para ativar as notificações. Tente outra vez."); } b.disabled = false; render(); }
+    else if (a === "reject") { S.rejecting = b.dataset.o; S.rejText = ""; render(); setTimeout(() => { const t = document.getElementById("rej-" + b.dataset.o); if (t) t.focus(); }, 50); }
+    else if (a === "reject-cancel") { S.rejecting = null; S.rejText = ""; render(); }
+    else if (a === "reject-confirm") {
+      const o = S.orders.find(x => x.id === b.dataset.o); const motivo = (S.rejText || "").trim();
+      if (motivo.length < 3) { toast("Escreva o motivo da rejeição (pelo menos 3 letras)."); return; }
+      b.disabled = true;
+      await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:"rejeitada", p_items:(S.edits[o.id] || o.items), p_entrega:null, p_motivo:motivo});
+      S.rejecting = null; S.rejText = ""; delete S.edits[o.id]; await loadOrders(); render(); toast("Pedido rejeitado. O colaborador recebe o motivo."); pushNotify("decisao", {order_id:o.id});
+    }
     else if (a === "toggle-order") { S.openOrd[b.dataset.o] = !S.openOrd[b.dataset.o]; render(); }
     else if (a === "undo-cart") { if (S.undo) { S.cart = S.undo; S.undo = null; saveCart(); $("#toast").hidden = true; render(); } }
     else if (a === "submit-cart") {
@@ -881,17 +934,18 @@ document.addEventListener("click", async ev => {
       const items = cartEntries().map(e => ({product_id:e.pid, supplier_id:e.sid, qty:e.qty, setor:e.setor}));
       const r = await rpc("compras_submit_order", {p_token:S.token, p_items:items, p_nota:val("cartnote")});
       S.cart = {}; saveCart(); await loadOrders();
+      if (!isChefe()) pushNotify("nova");
       toast((r.juntadas ? (r.juntadas === 1 ? "Produtos juntados à encomenda aberta do fornecedor. " : "Produtos juntados às encomendas abertas. ") : "")
         + (r.aprovadas ? "Envie-as em Pedidos." : "O chefe vai confirmar."));
       location.hash = "#pedidos";
     }
     else if (a === "oq") { const o = S.orders.find(x => x.id === b.dataset.o); const items = (S.edits[o.id] || o.items).map(x => ({...x})); const it = items[+b.dataset.i]; it.qty = Math.max(0, Math.round(((Number(it.qty)||0) + Number(b.dataset.d)) * 1000) / 1000); S.edits[o.id] = items; render(); }
-    else if (a === "approve" || a === "reject") {
+    else if (a === "approve") {
       b.disabled = true; const o = S.orders.find(x => x.id === b.dataset.o);
       const items = (S.edits[o.id] || o.items).filter(x => Number(x.qty) > 0);
       if (a === "approve" && !items.length) { toast("A encomenda ficou sem artigos. Rejeite-a."); b.disabled = false; return; }
       await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:a === "approve" ? "aprovada" : "rejeitada", p_items:items, p_entrega:S.deliv[o.id] || null});
-      delete S.edits[o.id]; await loadOrders(); render(); toast(a === "approve" ? "Confirmada. Envie-a ao fornecedor." : "Pedido rejeitado.");
+      delete S.edits[o.id]; await loadOrders(); render(); toast("Confirmada. Envie-a ao fornecedor."); pushNotify("decisao", {order_id:o.id});
     }
     else if (a === "approve-send") {
       b.disabled = true; const o = S.orders.find(x => x.id === b.dataset.o);
@@ -900,7 +954,7 @@ document.addEventListener("click", async ev => {
       const entrega = S.deliv[o.id] || null;
       await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:"aprovada", p_items:items, p_entrega:entrega});
       const msg = waMessage({...o, entrega: entrega || o.entrega}, items), ph = waPhone(o.telefone);
-      delete S.edits[o.id]; await loadOrders(); render();
+      delete S.edits[o.id]; await loadOrders(); render(); pushNotify("decisao", {order_id:o.id});
       if (o.via === "grupo" && navigator.share) { try { await navigator.share({text: msg}); toast("Confirmada. Depois de enviar, marque como enviada."); } catch(e){ toast("Confirmada. Toque em Partilhar no grupo para enviar."); } }
       else if (ph) { toast("Confirmada. A abrir o WhatsApp. Depois marque como enviada."); setTimeout(() => { location.href = "https://wa.me/" + ph + "?text=" + encodeURIComponent(msg); }, 700); }
       else toast("Confirmada. Falta o número do fornecedor para enviar.");
@@ -1008,6 +1062,7 @@ document.addEventListener("click", async ev => {
 });
 document.addEventListener("input", ev => {
   const t = ev.target;
+  if (t.id && t.id.startsWith("rej-")) { S.rejText = t.value; return; }
   if (t.id === "search") { S.search = t.value; render(); return; }
   if (t.dataset.rv && S.review && t.tagName === "INPUT") { S.review[t.dataset.rv] = t.value; return; }
   if (t.dataset.ln != null && S.review && t.tagName === "INPUT" && t.type !== "checkbox") {

@@ -5,6 +5,7 @@ App de compras do **Focus Sushi & Steak**: os colaboradores escolhem produtos e 
 - **App:** https://compras-focus.vercel.app
 - **Página:** um único ficheiro, `app/index.html` (HTML + CSS + JavaScript, sem build).
 - **Dados:** Supabase, projeto "financas" (`cckgrpmspyurgmbgtjdu`), tabelas `compras_*`.
+- **Notificações (push):** função `supabase/functions/compras-push` (web-push). Chaves de envio geradas na primeira utilização e guardadas em `compras_push_cfg`.
 - **Leitura de faturas:** função `supabase/functions/compras-ler-fatura` (Gemini, chave no segredo `GEMINI_API_KEY`).
 - **Alojamento:** Vercel, projeto `compras-focus`.
 

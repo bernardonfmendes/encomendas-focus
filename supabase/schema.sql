@@ -23,6 +23,7 @@ create table public.compras_users (
   locked_until timestamp with time zone,
   created_at timestamp with time zone not null default now(),
   setor text,
+  push_at timestamp with time zone,
   constraint compras_users_pkey PRIMARY KEY (id),
   constraint compras_users_role_check CHECK ((role = ANY (ARRAY['chefe'::text, 'colaborador'::text]))),
   constraint compras_users_setor_check CHECK ((setor = ANY (ARRAY['cozinha'::text, 'sushi'::text, 'bar'::text, 'takeaway'::text])))
@@ -126,6 +127,8 @@ create table public.compras_orders (
   approved_by uuid,
   approved_at timestamp with time zone,
   sent_at timestamp with time zone,
+  motivo text not null default ''::text,
+  push_dec_at timestamp with time zone,
   constraint compras_orders_pkey PRIMARY KEY (id),
   constraint compras_orders_approved_by_fkey FOREIGN KEY (approved_by) REFERENCES compras_users(id) ON DELETE SET NULL,
   constraint compras_orders_created_by_fkey FOREIGN KEY (created_by) REFERENCES compras_users(id) ON DELETE SET NULL,
@@ -133,6 +136,30 @@ create table public.compras_orders (
   constraint compras_orders_status_check CHECK ((status = ANY (ARRAY['pendente'::text, 'aprovada'::text, 'rejeitada'::text, 'enviada'::text])))
 );
 alter table public.compras_orders enable row level security;
+
+create table public.compras_push (
+  id uuid not null default gen_random_uuid(),
+  user_id uuid not null,
+  endpoint text not null,
+  p256dh text not null,
+  auth text not null,
+  created_at timestamp with time zone not null default now(),
+  constraint compras_push_pkey PRIMARY KEY (id),
+  constraint compras_push_endpoint_key UNIQUE (endpoint),
+  constraint compras_push_user_id_fkey FOREIGN KEY (user_id) REFERENCES compras_users(id) ON DELETE CASCADE
+);
+alter table public.compras_push enable row level security;
+
+-- Chaves de envio das notificações (geradas pela função compras-push; só acessíveis com a chave de serviço)
+create table public.compras_push_cfg (
+  id integer not null default 1,
+  vapid_public text not null,
+  vapid_private text not null,
+  created_at timestamp with time zone not null default now(),
+  constraint compras_push_cfg_pkey PRIMARY KEY (id),
+  constraint compras_push_cfg_id_check CHECK (id = 1)
+);
+alter table public.compras_push_cfg enable row level security;
 
 create table public.compras_invoice_drafts (
   id uuid not null default gen_random_uuid(),
@@ -465,7 +492,7 @@ begin
   end if;
 end $function$
 ;
-CREATE OR REPLACE FUNCTION public.compras_order_decide(p_token text, p_id uuid, p_status text, p_items jsonb, p_entrega date)
+CREATE OR REPLACE FUNCTION public.compras_order_decide(p_token text, p_id uuid, p_status text, p_items jsonb, p_entrega date, p_motivo text DEFAULT NULL::text)
  RETURNS void
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -475,13 +502,16 @@ declare u public.compras_users;
 begin
   u := public.compras__chefe(p_token);
   if p_status not in ('aprovada','rejeitada','enviada') then raise exception 'estado_invalido'; end if;
+  if p_status = 'rejeitada' and length(trim(coalesce(p_motivo, ''))) < 3 then raise exception 'motivo_obrigatorio'; end if;
   update public.compras_orders set
     status = p_status,
     items = case when p_items is not null and jsonb_typeof(p_items) = 'array' then p_items else items end,
     entrega = case when p_status = 'enviada' then entrega else p_entrega end,
     approved_by = case when p_status in ('aprovada','rejeitada') then u.id else approved_by end,
     approved_at = case when p_status in ('aprovada','rejeitada') then now() else approved_at end,
-    sent_at = case when p_status = 'enviada' then now() else sent_at end
+    sent_at = case when p_status = 'enviada' then now() else sent_at end,
+    motivo = case when p_status = 'rejeitada' then left(trim(p_motivo), 300) when p_status = 'aprovada' then '' else motivo end,
+    push_dec_at = case when p_status in ('aprovada','rejeitada') then null else push_dec_at end
   where id = p_id;
 end $function$
 ;
@@ -512,7 +542,7 @@ begin
     'orders', coalesce((select jsonb_agg(t.x order by t.ca desc) from (
        select o.created_at as ca, jsonb_build_object('id', o.id, 'supplier_id', o.supplier_id, 'fornecedor', coalesce(s.nome, o.fornecedor_nome),
          'telefone', case when u.role = 'chefe' then s.telefone else '' end,
-         'minimo', s.minimo, 'via', s.via, 'items', o.items, 'nota', o.nota, 'status', o.status, 'entrega', o.entrega,
+         'minimo', s.minimo, 'via', s.via, 'items', o.items, 'nota', o.nota, 'status', o.status, 'entrega', o.entrega, 'motivo', o.motivo,
          'criado_por', cu.nome, 'meu', o.created_by = u.id, 'created_at', o.created_at,
          'aprovado_por', au.nome, 'approved_at', o.approved_at, 'sent_at', o.sent_at) as x
          from public.compras_orders o
@@ -758,3 +788,101 @@ end $function$
 
 -- Funções internas não acessíveis por fora:
 revoke execute on function public.compras__user(text), public.compras__chefe(text) from anon, authenticated, public;
+CREATE OR REPLACE FUNCTION public.compras_push_save(p_token text, p_sub jsonb)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare u public.compras_users; ep text; k1 text; k2 text;
+begin
+  u := public.compras__user(p_token);
+  ep := p_sub->>'endpoint'; k1 := p_sub->'keys'->>'p256dh'; k2 := p_sub->'keys'->>'auth';
+  if coalesce(ep,'') = '' or coalesce(k1,'') = '' or coalesce(k2,'') = '' then raise exception 'subscricao_invalida'; end if;
+  insert into public.compras_push (user_id, endpoint, p256dh, auth) values (u.id, ep, k1, k2)
+  on conflict (endpoint) do update set user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth;
+end $function$
+;
+CREATE OR REPLACE FUNCTION public.compras_push_delete(p_token text, p_endpoint text)
+ RETURNS void
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  delete from public.compras_push where endpoint = p_endpoint and user_id = u.id;
+end $function$
+;
+CREATE OR REPLACE FUNCTION public.compras_push_cfg_get()
+ RETURNS jsonb
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+  select to_jsonb(c) from public.compras_push_cfg c where id = 1
+$function$
+;
+CREATE OR REPLACE FUNCTION public.compras_push_cfg_set(p_public text, p_private text)
+ RETURNS void
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+  insert into public.compras_push_cfg (id, vapid_public, vapid_private) values (1, p_public, p_private) on conflict (id) do nothing
+$function$
+;
+CREATE OR REPLACE FUNCTION public.compras_push_prune(p_endpoints text[])
+ RETURNS void
+ LANGUAGE sql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+  delete from public.compras_push where endpoint = any(p_endpoints)
+$function$
+;
+CREATE OR REPLACE FUNCTION public.compras_push_targets(p_token text, p_evento text, p_order uuid DEFAULT NULL::uuid)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare u public.compras_users; o public.compras_orders; subs jsonb; n int; v_sup text;
+  vazio constant jsonb := jsonb_build_object('subs', '[]'::jsonb);
+begin
+  u := public.compras__user(p_token);
+  if p_evento = 'teste' then
+    select coalesce(jsonb_agg(jsonb_build_object('endpoint', p.endpoint, 'p256dh', p.p256dh, 'auth', p.auth)), '[]'::jsonb) into subs
+      from public.compras_push p where p.user_id = u.id;
+    return jsonb_build_object('subs', subs, 'title', 'Notificações ativadas', 'body', 'Vai receber avisos das encomendas neste aparelho.', 'url', '/#pedidos', 'tag', 'teste');
+  elsif p_evento = 'nova' then
+    if u.push_at is not null and u.push_at > now() - interval '30 seconds' then return vazio; end if;
+    select count(*) into n from public.compras_orders where status = 'pendente';
+    if n = 0 then return vazio; end if;
+    update public.compras_users set push_at = now() where id = u.id;
+    select coalesce(jsonb_agg(jsonb_build_object('endpoint', p.endpoint, 'p256dh', p.p256dh, 'auth', p.auth)), '[]'::jsonb) into subs
+      from public.compras_push p join public.compras_users c on c.id = p.user_id
+     where c.role = 'chefe' and c.ativo and c.id <> u.id;
+    return jsonb_build_object('subs', subs, 'title', 'Nova encomenda por confirmar',
+      'body', u.nome || ' fez um pedido · ' || n || ' por confirmar', 'url', '/#pedidos', 'tag', 'nova');
+  elsif p_evento = 'decisao' then
+    perform public.compras__chefe(p_token);
+    select * into o from public.compras_orders where id = p_order;
+    if not found or o.status not in ('aprovada','rejeitada') or o.approved_at is null or o.approved_at < now() - interval '15 minutes'
+       or o.push_dec_at is not null or o.created_by is null or o.created_by = u.id then return vazio; end if;
+    update public.compras_orders set push_dec_at = now() where id = o.id;
+    select coalesce(s.nome, o.fornecedor_nome) into v_sup from public.compras_suppliers s where s.id = o.supplier_id;
+    v_sup := coalesce(v_sup, o.fornecedor_nome, 'Fornecedor');
+    select coalesce(jsonb_agg(jsonb_build_object('endpoint', p.endpoint, 'p256dh', p.p256dh, 'auth', p.auth)), '[]'::jsonb) into subs
+      from public.compras_push p join public.compras_users c on c.id = p.user_id where c.id = o.created_by and c.ativo;
+    if o.status = 'rejeitada' then
+      return jsonb_build_object('subs', subs, 'title', 'Encomenda rejeitada · ' || v_sup, 'body', 'Motivo: ' || coalesce(nullif(o.motivo, ''), 'sem motivo indicado'), 'url', '/#pedidos', 'tag', 'dec-' || o.id);
+    end if;
+    return jsonb_build_object('subs', subs, 'title', 'Encomenda confirmada · ' || v_sup, 'body', 'O chefe confirmou o seu pedido.', 'url', '/#pedidos', 'tag', 'dec-' || o.id);
+  end if;
+  raise exception 'evento_invalido';
+end $function$
+;
+revoke execute on function public.compras_push_cfg_get(), public.compras_push_cfg_set(text, text), public.compras_push_prune(text[]), public.compras_push_targets(text, text, uuid) from public, anon, authenticated;
+grant execute on function public.compras_push_cfg_get(), public.compras_push_cfg_set(text, text), public.compras_push_prune(text[]), public.compras_push_targets(text, text, uuid) to service_role;
