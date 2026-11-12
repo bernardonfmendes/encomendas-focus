@@ -642,7 +642,7 @@ begin
       values (pid, sid, coalesce(l->>'desc',''), coalesce(l->>'codigo',''), pq, pp, up, null, d, inv);
     elsif prev.data is null or d >= prev.data then
       update public.compras_offers o set alias = coalesce(l->>'desc',''), codigo = coalesce(l->>'codigo',''), pack_qty = pq, pack_price = pp,
-        unit_price = up, prev_unit_price = case when prev.invoice_id = inv then prev.prev_unit_price else prev.unit_price end, data = d, invoice_id = inv
+        unit_price = up, prev_unit_price = case when prev.invoice_id = inv then prev.prev_unit_price when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null when up > 0 and prev.unit_price > 0 and (up / prev.unit_price >= 2.5 or up / prev.unit_price <= 0.4) then null else prev.unit_price end, data = d, invoice_id = inv
        where o.product_id = pid and o.supplier_id = sid;
     end if;
     n := n + 1;

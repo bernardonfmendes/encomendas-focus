@@ -192,6 +192,12 @@ input,select,textarea{font-size:16px!important}
 .pl.pop .stepper,.pl.pop .addbtn{animation:pop .35s ease-out}
 @keyframes pop{0%{transform:scale(.8)}60%{transform:scale(1.12)}100%{transform:scale(1)}}
 @media (prefers-reduced-motion:reduce){.pl.pop .stepper,.pl.pop .addbtn{animation:none}}
+.pchg{display:flex;align-items:center;gap:12px;padding:11px 12px;border-top:1px solid var(--line)}.pchg:first-child{border-top:0}
+.pchg .pn{flex:1;min-width:0}.pchg .pn b{display:block;font-weight:600;font-size:15px}.pchg .pn small{color:var(--muted)}
+.big{font-weight:800;font-size:15px;border-radius:9px;padding:5px 9px;white-space:nowrap;font-variant-numeric:tabular-nums}.big.up{background:var(--bad-soft);color:var(--bad)}.big.down{background:var(--good-soft);color:var(--good)}
+.pxsum{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:4px 0 12px}.pxsum .card{padding:10px 12px;width:100%;display:block;font:inherit;color:inherit;cursor:pointer}.pxsum b{font-size:22px;display:block}
+.cmp{padding:11px 12px;border-top:1px solid var(--line)}.cmp:first-child{border-top:0}.cmp>b{font-weight:600;font-size:15px}
+.cmpl{display:flex;justify-content:space-between;gap:8px;font-size:14px;padding:3px 0}.cmpl.best{font-weight:700;color:var(--good)}.cmpl span:last-child{font-variant-numeric:tabular-nums;white-space:nowrap}
 .stk{font-size:12.5px;color:var(--muted);margin-top:2px}.stk b{color:var(--ink);font-weight:600}.stk .neg{color:var(--bad)}.stk .low{color:var(--warn)}
 .slist{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
 .srow2{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--line)}.srow2:first-child{border-top:0}
@@ -317,7 +323,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, showDiff:false
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", fatTab:null, fatF:"todos", renaming:null, stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, showDiff:false
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -754,7 +760,8 @@ function viewCount(){
   for (const p of list) {
     if (p.categoria !== cat) { if (open) h += `</div>`; cat = p.categoria; h += `<div class="cnthd">${esc(cat || "Outros")}</div><div class="slist">`; open = true; }
     const v = countVal(p.id, setor);
-    h += `<div class="srow2"><div class="sn"><b>${esc(p.nome)}</b><small>em ${esc(p.unidade || "un")}</small></div><input class="cin${v !== null ? " done" : ""}" data-p="${p.id}" value="${v !== null ? esc(num(v, 3)) : ""}" inputmode="decimal" placeholder="—" aria-label="Quantidade de ${esc(p.nome)} em ${esc(p.unidade || "un")}"></div>`;
+    if (S.renaming === p.id) { h += `<div class="srow2" style="flex-wrap:wrap"><input id="rn-input" value="${esc(p.nome)}" aria-label="Novo nome de ${esc(p.nome)}" style="flex:1 1 180px" autocomplete="off"><button class="small primary" data-action="rn-save" data-p="${p.id}">Guardar</button><button class="small" data-action="rn-cancel">Cancelar</button></div>`; continue; }
+    h += `<div class="srow2"><div class="sn"><b>${esc(p.nome)}${isChefe() ? ` <button class="edit" data-action="rn-start" data-p="${p.id}" aria-label="Mudar o nome de ${esc(p.nome)}">✎</button>` : ""}</b><small>em ${esc(p.unidade || "un")}</small></div><input class="cin${v !== null ? " done" : ""}" data-p="${p.id}" value="${v !== null ? esc(num(v, 3)) : ""}" inputmode="decimal" placeholder="—" aria-label="Quantidade de ${esc(p.nome)} em ${esc(p.unidade || "un")}"></div>`;
   }
   if (open) h += `</div>`;
   if (!list.length) h += `<p class="muted">Nenhum produto encontrado.</p>`;
@@ -764,9 +771,38 @@ function viewCount(){
 }
 
 // ---------- invoices ----------
+function priceChanges(){
+  const ch = []; S.products.forEach(p => p.offers.forEach(o => { if (o.prev_unit_price && o.unit_price && Math.abs(o.unit_price - o.prev_unit_price) / o.prev_unit_price >= 0.03) ch.push({p, o, d:(o.unit_price - o.prev_unit_price) / o.prev_unit_price * 100}); }));
+  return ch.sort((a, b) => (b.o.data || "").localeCompare(a.o.data || "") || Math.abs(b.d) - Math.abs(a.d));
+}
+function viewPrices(){
+  const ch = priceChanges(), up = ch.filter(c => c.d > 0), down = ch.filter(c => c.d < 0);
+  let h = `<p class="lead">Comparado com a fatura anterior do mesmo fornecedor (variações de 3% ou mais).</p>
+    <div class="pxsum"><button class="card" data-action="fat-f" data-f="${S.fatF === "up" ? "todos" : "up"}" aria-pressed="${S.fatF === "up"}" style="text-align:left;${S.fatF === "up" ? "border-color:var(--bad)" : ""}"><b style="color:var(--bad)">▲ ${up.length}</b><small class="muted">preços subiram</small></button>
+    <button class="card" data-action="fat-f" data-f="${S.fatF === "down" ? "todos" : "down"}" aria-pressed="${S.fatF === "down"}" style="text-align:left;${S.fatF === "down" ? "border-color:var(--good)" : ""}"><b style="color:var(--good)">▼ ${down.length}</b><small class="muted">preços desceram</small></button></div>`;
+  const list = S.fatF === "up" ? up : S.fatF === "down" ? down : ch;
+  h += list.length ? `<div class="slist">` + list.slice(0, 60).map(c => { const bu = c.p.unidade || "un"; return `<div class="pchg"><div class="pn"><b>${esc(c.p.nome)}</b><small>${esc(supById(c.o.supplier_id).nome || "")}${c.o.data ? " · " + fmtDate(c.o.data) : ""}<br>${eur(c.o.prev_unit_price)} → <b style="display:inline;font-size:inherit">${eur(c.o.unit_price)}</b> / ${esc(bu)}</small></div><span class="big ${c.d > 0 ? "up" : "down"}">${c.d > 0 ? "▲ +" : "▼ −"}${num(Math.abs(c.d), 0)}%</span></div>`; }).join("") + `</div>`
+    : `<p class="muted">Nenhum preço mudou${S.fatF === "up" ? " para cima" : S.fatF === "down" ? " para baixo" : ""}.</p>`;
+  // mesmo produto em vários fornecedores
+  const multi = S.products.filter(p => p.offers.filter(o => Number(o.unit_price) > 0).length > 1).map(p => {
+    const offs = p.offers.filter(o => Number(o.unit_price) > 0).sort((a, b) => a.unit_price - b.unit_price);
+    return {p, offs, gap:(offs[offs.length - 1].unit_price - offs[0].unit_price) / offs[0].unit_price * 100};
+  }).sort((a, b) => b.gap - a.gap);
+  h += `<h3 style="margin:22px 0 4px">Onde é mais barato</h3><p class="lead">Produtos que compra a mais de um fornecedor, comparados pelo preço por kg, litro ou unidade.</p>`;
+  h += multi.length ? `<div class="slist">` + multi.map(m => { const bu = m.p.unidade || "un"; return `<div class="cmp"><b>${esc(m.p.nome)}</b>` + m.offs.map((o, i) => `<div class="cmpl ${i === 0 ? "best" : ""}"><span>${i === 0 ? "✓ " : ""}${esc(supById(o.supplier_id).nome || "")}</span><span>${eur(o.unit_price)} / ${esc(bu)}${i === 0 ? " · mais barato" : ` · +${num((o.unit_price - m.offs[0].unit_price) / m.offs[0].unit_price * 100, 0)}%`}</span></div>`).join("") + `</div>`; }).join("") + `</div>`
+    : `<p class="muted">Ainda não há produtos comprados a mais de um fornecedor.</p>`;
+  return h;
+}
 function viewInvoices(){
   if (S.review) return viewReview();
-  let h = `<h2>Faturas</h2><p class="lead">Fotografe a fatura (inteira, de frente, bem iluminada) ou escolha o PDF que o fornecedor enviou. A leitura corre em segundo plano: pode fotografar a seguinte logo a seguir e rever quando estiver pronta.</p>
+  if (S.files.length || S.queueing || S.readMsg) S.fatTab = "ler";
+  const tab = S.fatTab || (S.drafts.length ? "ler" : "precos");
+  const T = [["precos","Preços"],["ler","Ler faturas" + (S.drafts.length ? ` (${S.drafts.length})` : "")],["lista","Histórico"]];
+  let h = `<h2 style="margin-bottom:8px">Faturas</h2><div class="seg" role="tablist" aria-label="Faturas" style="display:grid;grid-template-columns:repeat(3,1fr);gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:3px;margin-bottom:12px">${T.map(([k, n]) => `<button class="chip" role="tab" style="border:0;border-radius:9px;justify-content:center;${tab === k ? "background:var(--accent);color:var(--on-accent)" : "background:none"}" data-action="fat-tab" data-t="${k}" aria-selected="${tab === k}">${n}</button>`).join("")}</div>`;
+  if (tab === "precos") return h + viewPrices();
+  if (tab === "lista") return h + (S.invoices.length ? `<div class="card scroll"><table class="list"><thead><tr><th>Data</th><th>Fornecedor</th><th>Nº</th><th>Linhas</th><th>Total c/ IVA</th></tr></thead><tbody>`
+    + S.invoices.map(f => `<tr><td class="num">${fmtDate(f.data)}</td><td>${esc(f.fornecedor)}</td><td>${esc(f.numero)}</td><td class="num">${f.linhas}</td><td class="num">${f.total != null ? eur(f.total) : "—"}</td></tr>`).join("") + `</tbody></table></div>` : `<p class="muted">Ainda não há faturas.</p>`);
+  h += `<p class="lead">Fotografe a fatura (inteira, de frente, bem iluminada) ou escolha o PDF que o fornecedor enviou. A leitura corre em segundo plano: pode fotografar a seguinte logo a seguir e rever quando estiver pronta.</p>
   <div class="drop"><label class="f">Fotografias ou PDF da fatura (até 5 páginas)<input type="file" id="files" accept="image/*,application/pdf" multiple ${S.queueing ? "disabled" : ""}></label>
   <div class="thumbs">${S.files.map((f, i) => S.previews[i] ? `<img src="${S.previews[i]}" alt="Página ${i+1}">` : `<span class="card" style="padding:10px">PDF · ${esc(f.name)}</span>`).join("")}</div>`;
   h += S.queueing ? `<div class="row"><span class="spinner" aria-hidden="true"></span><span>A enviar…</span></div>`
@@ -785,8 +821,6 @@ function viewInvoices(){
         <div class="row" style="flex:0 0 auto">${d.status === "pronta" ? `<button class="small primary" data-action="open-draft" data-d="${d.id}">Rever</button>` : ""}${d.status !== "a_ler" ? `<button class="small danger" data-action="del-draft" data-d="${d.id}">Apagar</button>` : ""}</div></div>`;
     }).join("") + `</div>`;
   }
-  if (S.invoices.length) h += `<h3 style="margin:22px 0 8px">Últimas faturas</h3><div class="card scroll"><table class="list"><thead><tr><th>Data</th><th>Fornecedor</th><th>Nº</th><th>Linhas</th><th>Total c/ IVA</th></tr></thead><tbody>`
-    + S.invoices.map(f => `<tr><td class="num">${fmtDate(f.data)}</td><td>${esc(f.fornecedor)}</td><td>${esc(f.numero)}</td><td class="num">${f.linhas}</td><td class="num">${f.total != null ? eur(f.total) : "—"}</td></tr>`).join("") + `</tbody></table></div>`;
   return h;
 }
 function calcUnit(l){ const p = parseNum(l.price), q = parseNum(l.packQty) || 1; return isFinite(p) && p >= 0 && q > 0 ? p / q : null; }
@@ -940,11 +974,6 @@ function viewGestao(){
       <label class="f">Sítio<select id="nuSetor">${SETORES.map(([k, n]) => `<option value="${k}">${n}</option>`).join("")}</select></label>
       <label class="f">PIN (6 números)<input id="nuPin" inputmode="numeric" maxlength="6" autocomplete="off"></label></div>
       <div class="row" style="margin-top:10px"><button class="primary small" data-action="user-add">Adicionar</button><button class="small" data-action="gen-pin">Gerar PIN</button></div></div></div>`;
-  // price changes
-  const ch = []; S.products.forEach(p => p.offers.forEach(o => { if (o.prev_unit_price && o.unit_price && Math.abs(o.unit_price - o.prev_unit_price) / o.prev_unit_price >= 0.03) ch.push({p, o, d:(o.unit_price - o.prev_unit_price) / o.prev_unit_price * 100}); }));
-  ch.sort((a,b) => (b.o.data || "").localeCompare(a.o.data || ""));
-  if (ch.length) h += `<h2 style="margin-top:20px">Alterações de preço</h2><p class="lead">Variações de 3% ou mais face à fatura anterior do mesmo fornecedor.</p><div class="card scroll"><table class="list"><thead><tr><th>Produto</th><th>Fornecedor</th><th>Antes</th><th>Agora</th><th>Var.</th></tr></thead><tbody>`
-    + ch.slice(0, 15).map(c => `<tr><td>${esc(c.p.nome)}</td><td>${esc(supById(c.o.supplier_id).nome)}</td><td class="num">${eur(c.o.prev_unit_price)}</td><td class="num">${eur(c.o.unit_price)}</td><td><span class="tag ${c.d > 0 ? "up" : "down"}">${c.d > 0 ? "↑" : "↓"} ${num(Math.abs(c.d),0)}%</span></td></tr>`).join("") + `</tbody></table></div>`;
   // suppliers
   h += `<h2 style="margin-top:20px">Fornecedores</h2><p class="lead">O WhatsApp é usado para abrir a mensagem da encomenda.</p><div class="stack">`;
   if (!S.suppliers.length) h += `<p class="muted">Os fornecedores são criados quando lê a primeira fatura de cada um.</p>`;
@@ -985,7 +1014,8 @@ function minInfo(minimo, total){
     : `<small class="oki">✓ Mínimo de entrega atingido (${eur(minimo)})</small>`);
 }
 document.addEventListener("click", ev => { if (ev.target.id === "supModal") { S.supOpen = false; render(); } });
-document.addEventListener("keydown", ev => { if (ev.key === "Escape" && S.supOpen) { S.supOpen = false; render(); } });
+document.addEventListener("keydown", ev => { if (ev.key === "Escape" && S.supOpen) { S.supOpen = false; render(); }
+  if (ev.target && ev.target.id === "rn-input") { if (ev.key === "Enter") { ev.preventDefault(); const b = document.querySelector('[data-action="rn-save"]'); if (b) b.click(); } else if (ev.key === "Escape") { S.renaming = null; render(); } } });
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("[data-action]"); if (!b) return;
   const a = b.dataset.action;
@@ -1012,6 +1042,17 @@ document.addEventListener("click", async ev => {
       await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:"rejeitada", p_items:(S.edits[o.id] || o.items), p_entrega:null, p_motivo:motivo});
       S.rejecting = null; S.rejText = ""; delete S.edits[o.id]; await loadOrders(); render(); toast("Pedido rejeitado. O colaborador recebe o motivo."); pushNotify("decisao", {order_id:o.id});
     }
+    else if (a === "rn-start") { S.renaming = b.dataset.p; render(); const n = document.getElementById("rn-input"); if (n) { n.focus(); n.select(); } }
+    else if (a === "rn-cancel") { S.renaming = null; render(); }
+    else if (a === "rn-save") {
+      const p = prodById(b.dataset.p), nome = (val("rn-input") || "").trim();
+      if (!p || !nome) { toast("Escreva o nome."); return; }
+      b.disabled = true;
+      await rpc("compras_save_product", {p_token:S.token, p_id:p.id, p_nome:nome, p_categoria:p.categoria, p_unidade:p.unidade});
+      S.renaming = null; await loadCatalog(); render(); toast("Nome guardado.");
+    }
+    else if (a === "fat-tab") { S.fatTab = b.dataset.t; render(); }
+    else if (a === "fat-f") { S.fatF = b.dataset.f; render(); }
     else if (a === "stock-f") { S.stockF = b.dataset.f; render(); }
     else if (a === "count-diff") { S.showDiff = !S.showDiff; render(); }
     else if (a === "count-go") { S.counting = true; S.countQ = ""; render(); window.scrollTo(0, 0); }
