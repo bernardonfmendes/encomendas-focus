@@ -610,7 +610,7 @@ begin
     if pq <= 0 then pq := 1; end if;
     if pp is null or pp < 0 then continue; end if;
     -- vasilhame / caução não é produto (ex.: "Barril Damm 50L Vas")
-    if coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|vasilhame|cau[cç][aã]o|tara)([^[:alnum:]]|$)' then continue; end if;
+    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o)' or (coalesce(l->>'desc','') ~* 'barril' and coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])vas([^[:alnum:]]|$)') then continue; end if;
     up := pp / pq;
     pid := nullif(l->>'product_id','')::uuid;
     if pid is null then
