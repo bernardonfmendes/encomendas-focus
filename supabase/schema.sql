@@ -886,3 +886,114 @@ end $function$
 ;
 revoke execute on function public.compras_push_cfg_get(), public.compras_push_cfg_set(text, text), public.compras_push_prune(text[]), public.compras_push_targets(text, text, uuid) from public, anon, authenticated;
 grant execute on function public.compras_push_cfg_get(), public.compras_push_cfg_set(text, text), public.compras_push_prune(text[]), public.compras_push_targets(text, text, uuid) to service_role;
+
+-- ============================================================
+-- Receitas importadas do Guará (fichas técnicas)
+-- ============================================================
+create table if not exists public.compras_recipes (
+  id uuid primary key default gen_random_uuid(),
+  guara_id text unique not null,
+  nome text not null,
+  categoria text default '',
+  rendimento numeric,
+  rendimento_unidade text not null default '',
+  preco_venda numeric,            -- PVP com IVA (só nas receitas "finais")
+  extra jsonb default '{}',       -- final, iva, food_cost_pct, custo_guara, alergenios
+  atualizado_em timestamptz default now()
+);
+create table if not exists public.compras_recipe_items (
+  id uuid primary key default gen_random_uuid(),
+  recipe_id uuid references public.compras_recipes(id) on delete cascade,
+  ordem int default 0,
+  ingrediente text not null,
+  product_id uuid references public.compras_products(id) on delete set null,
+  sub_recipe_guara_id text,       -- quando o ingrediente é outra receita
+  qty numeric,
+  unidade text not null default '',
+  perda_pct numeric,
+  extra jsonb default '{}'        -- custo_guara
+);
+create index if not exists compras_recipe_items_product_idx on public.compras_recipe_items(product_id);
+alter table public.compras_recipes enable row level security;
+alter table public.compras_recipe_items enable row level security;
+
+CREATE OR REPLACE FUNCTION public.compras__norm(t text)
+ RETURNS text
+ LANGUAGE sql
+ IMMUTABLE
+ SET search_path TO 'public'
+AS $function$
+  select trim(regexp_replace(translate(lower(regexp_replace(coalesce(t,''), '\s*\[[^\]]*\]\s*$', '')),
+    'áàâãäéèêëíìîïóòôõöúùûüçñ', 'aaaaaeeeeiiiiooooouuuucn'), '[^a-z0-9]+', ' ', 'g'))
+$function$
+;
+
+CREATE OR REPLACE FUNCTION public.compras_import_recipes(p_token text, p_receitas jsonb, p_completo boolean DEFAULT false)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare u public.compras_users; r jsonb; it jsonb; rid uuid; pid uuid; nr int := 0; ni int := 0; ns int := 0; ord int; k text; un text;
+begin
+  u := public.compras__chefe(p_token);
+  for r in select * from jsonb_array_elements(coalesce(p_receitas,'[]')) loop
+    if coalesce(r->>'guara_id','') = '' or coalesce(trim(r->>'nome'),'') = '' then continue; end if;
+    un := case when r->>'rendimento_unidade' in ('un','kg','L') then r->>'rendimento_unidade' else 'un' end;
+    insert into public.compras_recipes (guara_id, nome, categoria, rendimento, rendimento_unidade, preco_venda, extra, atualizado_em)
+    values (r->>'guara_id', trim(r->>'nome'), coalesce(r->>'categoria',''), nullif(r->>'rendimento','')::numeric, un,
+            nullif(r->>'preco_venda','')::numeric, coalesce(r->'extra','{}'::jsonb), now())
+    on conflict (guara_id) do update set nome = excluded.nome, categoria = excluded.categoria, rendimento = excluded.rendimento,
+      rendimento_unidade = excluded.rendimento_unidade, preco_venda = excluded.preco_venda, extra = excluded.extra, atualizado_em = now()
+    returning id into rid;
+    delete from public.compras_recipe_items where recipe_id = rid;
+    ord := 0;
+    for it in select * from jsonb_array_elements(coalesce(r->'ingredientes','[]')) loop
+      ord := ord + 1; pid := null;
+      if coalesce(it->>'sub_receita_id','') = '' then
+        k := public.compras__norm(it->>'nome');
+        select p.id into pid from public.compras_products p where public.compras__norm(p.nome) = k limit 1;
+        if pid is null then
+          select o.product_id into pid from public.compras_offers o where public.compras__norm(o.alias) = k limit 1;
+        end if;
+        if pid is null then ns := ns + 1; end if;
+      end if;
+      insert into public.compras_recipe_items (recipe_id, ordem, ingrediente, qty, unidade, perda_pct, product_id, sub_recipe_guara_id, extra)
+      values (rid, ord, coalesce(it->>'nome',''), nullif(it->>'qty','')::numeric,
+              case when it->>'unidade' in ('un','kg','L') then it->>'unidade' else 'un' end,
+              nullif(it->>'perda_pct','')::numeric, pid, nullif(it->>'sub_receita_id',''),
+              coalesce(it->'extra','{}'::jsonb) || case when it ? 'custo' then jsonb_build_object('custo_guara', it->'custo') else '{}'::jsonb end);
+      ni := ni + 1;
+    end loop;
+    nr := nr + 1;
+  end loop;
+  if p_completo then
+    delete from public.compras_recipes where guara_id not in (select x->>'guara_id' from jsonb_array_elements(coalesce(p_receitas,'[]')) x);
+  end if;
+  return jsonb_build_object('receitas', nr, 'ingredientes', ni, 'sem_produto', ns);
+end $function$
+;
+
+-- Preenche o total das faturas (só onde está vazio), por número + início do nome do fornecedor
+CREATE OR REPLACE FUNCTION public.compras_set_invoice_totals(p_token text, p_list jsonb)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'extensions'
+AS $function$
+declare u public.compras_users; x jsonb; n int := 0; c int;
+begin
+  u := public.compras__chefe(p_token);
+  for x in select * from jsonb_array_elements(coalesce(p_list,'[]')) loop
+    if nullif(x->>'total','') is null then continue; end if;
+    update public.compras_invoices i set total = (x->>'total')::numeric
+     from public.compras_suppliers s
+    where s.id = i.supplier_id and i.total is null
+      and lower(regexp_replace(coalesce(i.numero,''), '\s', '', 'g')) = lower(regexp_replace(coalesce(x->>'numero',''), '\s', '', 'g'))
+      and (lower(regexp_replace(s.nome, '[^A-Za-z0-9]', '', 'g')) like lower(regexp_replace(coalesce(x->>'fornecedor',''), '[^A-Za-z0-9]', '', 'g')) || '%'
+        or lower(regexp_replace(coalesce(x->>'fornecedor',''), '[^A-Za-z0-9]', '', 'g')) like lower(regexp_replace(s.nome, '[^A-Za-z0-9]', '', 'g')) || '%');
+    get diagnostics c = row_count; n := n + c;
+  end loop;
+  return jsonb_build_object('atualizadas', n);
+end $function$
+;

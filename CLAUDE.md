@@ -6,6 +6,6 @@
 - Base de dados: Supabase `cckgrpmspyurgmbgtjdu`. Alterações de estrutura com migrations; manter `supabase/schema.sql` atualizado.
   Tabelas `compras_*` só são acedidas por funções SECURITY DEFINER que recebem `p_token`; `compras__user`/`compras__chefe` validam a sessão.
 - O mesmo projeto Supabase tem a app de finanças pessoais (outras tabelas). Não mexer em nada fora de `compras_*`.
-- Faturas: o Guará (guara.pt) é a fonte principal; há uma tarefa agendada ao domingo que importa faturas novas com `compras_import_invoice`.
+- Faturas: o Guará (guara.pt) é a fonte principal; importam-se a pedido ("dá-lhe agora"), com `compras_import_invoice` (a tarefa agendada de domingo está desligada). Receitas: `compras_import_recipes` (sempre `p_completo:false`).
   Atenção: o Guará não traz o peso de artigos vendidos ao kg (ex.: salmão na Makro), por isso esses preços podem vir errados.
 - Nunca pôr PINs, chaves ou palavras-passe no repositório.
