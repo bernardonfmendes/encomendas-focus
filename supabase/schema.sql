@@ -243,7 +243,7 @@ begin
     'products', coalesce((select jsonb_agg(jsonb_build_object(
         'id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade, 'setores', to_jsonb(p.setores),
         'offers', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'alias', o.alias, 'codigo', o.codigo,
-             'pack_qty', o.pack_qty, 'pack_price', o.pack_price, 'unit_price', o.unit_price, 'prev_unit_price', o.prev_unit_price, 'data', o.data)
+             'pack_qty', o.pack_qty, 'pack_price', o.pack_price, 'unit_price', o.unit_price, 'prev_unit_price', o.prev_unit_price, 'prev_data', o.prev_data, 'data', o.data)
              order by o.unit_price) from public.compras_offers o where o.product_id = p.id), '[]')
       ) order by lower(p.nome)) from public.compras_products p), '[]')
   );
@@ -642,7 +642,7 @@ begin
       values (pid, sid, coalesce(l->>'desc',''), coalesce(l->>'codigo',''), pq, pp, up, null, d, inv);
     elsif prev.data is null or d >= prev.data then
       update public.compras_offers o set alias = coalesce(l->>'desc',''), codigo = coalesce(l->>'codigo',''), pack_qty = pq, pack_price = pp,
-        unit_price = up, prev_unit_price = case when prev.invoice_id = inv then prev.prev_unit_price when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null when up > 0 and prev.unit_price > 0 and (up / prev.unit_price >= 2.5 or up / prev.unit_price <= 0.4) then null else prev.unit_price end, data = d, invoice_id = inv
+        unit_price = up, prev_unit_price = case when prev.invoice_id = inv then prev.prev_unit_price when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null when up > 0 and prev.unit_price > 0 and (up / prev.unit_price >= 2.5 or up / prev.unit_price <= 0.4) then null else prev.unit_price end, prev_data = case when prev.invoice_id = inv then prev.prev_data when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null else prev.data end, data = d, invoice_id = inv
        where o.product_id = pid and o.supplier_id = sid;
     end if;
     n := n + 1;
@@ -1335,3 +1335,6 @@ begin
    where x.q > 0;
 end $$;
 revoke execute on function public.compras__refresh_media_sushi() from public, anon, authenticated;
+
+-- Data da fatura do preço anterior
+alter table public.compras_offers add column if not exists prev_data date;
