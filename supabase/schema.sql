@@ -914,6 +914,13 @@ create table if not exists public.compras_recipe_items (
   extra jsonb default '{}'        -- custo_guara
 );
 create index if not exists compras_recipe_items_product_idx on public.compras_recipe_items(product_id);
+-- Ligações confirmadas pelo dono: nome do ingrediente no Guará (normalizado) -> produto da app
+create table if not exists public.compras_recipe_aliases (
+  ingrediente text primary key,
+  product_id uuid not null references public.compras_products(id) on delete cascade,
+  created_at timestamptz default now()
+);
+alter table public.compras_recipe_aliases enable row level security;
 alter table public.compras_recipes enable row level security;
 alter table public.compras_recipe_items enable row level security;
 
@@ -952,7 +959,10 @@ begin
       ord := ord + 1; pid := null;
       if coalesce(it->>'sub_receita_id','') = '' then
         k := public.compras__norm(it->>'nome');
-        select p.id into pid from public.compras_products p where public.compras__norm(p.nome) = k limit 1;
+        select a.product_id into pid from public.compras_recipe_aliases a where a.ingrediente = k;
+        if pid is null then
+          select p.id into pid from public.compras_products p where public.compras__norm(p.nome) = k limit 1;
+        end if;
         if pid is null then
           select o.product_id into pid from public.compras_offers o where public.compras__norm(o.alias) = k limit 1;
         end if;
