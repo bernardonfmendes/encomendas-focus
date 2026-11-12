@@ -610,9 +610,13 @@ begin
     if pq <= 0 then pq := 1; end if;
     if pp is null or pp < 0 then continue; end if;
     -- vasilhame / caução não é produto (ex.: "Barril Damm 50L Vas")
-    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o)' or (coalesce(l->>'desc','') ~* 'barril' and coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])vas([^[:alnum:]]|$)') then continue; end if;
+    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o)' or coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)' then continue; end if;
     up := pp / pq;
     pid := nullif(l->>'product_id','')::uuid;
+    -- primeiro: o mesmo artigo já conhecido neste fornecedor (pela descrição da fatura)
+    if pid is null and coalesce(l->>'desc','') <> '' then
+      select o.product_id into pid from public.compras_offers o where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc') limit 1;
+    end if;
     if pid is null then
       k := lower(trim(coalesce(l->>'novo_nome','')));
       if k = '' then continue; end if;
