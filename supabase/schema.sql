@@ -1195,6 +1195,7 @@ begin
   select distinct on ((x->>'codigo')::int) (x->>'codigo')::int, coalesce(x->>'descricao','')
     from jsonb_array_elements(coalesce(p_rows,'[]')) x where nullif(x->>'codigo','') is not null
   on conflict (codigo) do update set descricao = excluded.descricao;
+  perform public.compras__refresh_media_sushi();
   return jsonb_build_object('linhas', n, 'substituidas', nd);
 end $function$;
 
@@ -1298,3 +1299,33 @@ begin
 end $function$;
 
 revoke execute on function public.compras__recipe_usage(), public.compras__consumption(), public.compras__stock_rows(), public.compras__item_qty(public.compras_recipe_items) from public, anon, authenticated;
+
+-- Peças de sushi por venda (rolos do all you can eat = 4 peças) e "peça média" para as "@Repetição N peças"
+alter table public.compras_zs_items add column if not exists pecas numeric;
+insert into public.compras_recipes (guara_id, nome, categoria, rendimento, rendimento_unidade, extra)
+values ('local-media-sushi', 'Peça média de sushi (all you can eat)', 'Local', 1, 'un', '{"local": true}')
+on conflict (guara_id) do nothing;
+
+-- Recalcula a peça média: o que se gastou no sushi do all you can eat (últimos 60 dias) a dividir pelas peças servidas
+create or replace function public.compras__refresh_media_sushi() returns void
+language plpgsql security definer set search_path to 'public' as $$
+declare rid uuid; mx date; pcs numeric;
+begin
+  select id into rid from public.compras_recipes where guara_id = 'local-media-sushi';
+  if rid is null then return; end if;
+  select max(dia) into mx from public.compras_sales;
+  select sum(s.qtd * z.pecas) into pcs from public.compras_sales s join public.compras_zs_items z on z.codigo = s.codigo
+   where z.pecas is not null and s.dia > mx - 60;
+  delete from public.compras_recipe_items where recipe_id = rid;
+  if coalesce(pcs, 0) <= 0 then return; end if;
+  insert into public.compras_recipe_items (recipe_id, ordem, ingrediente, product_id, qty, unidade, extra)
+  select rid, row_number() over (order by p.nome), p.nome, p.id, round(x.q / pcs * p.receita_fator, 6), p.unidade, jsonb_build_object('calculado', true, 'pecas', pcs)
+    from (select u.product_id, sum(s.qtd * z.fator * u.qty) q
+            from public.compras_sales s
+            join public.compras_zs_items z on z.codigo = s.codigo and z.pecas is not null and z.recipe_guara_id is not null
+            join public.compras__recipe_usage() u on u.root = z.recipe_guara_id
+           where s.dia > mx - 60 group by 1) x
+    join public.compras_products p on p.id = x.product_id
+   where x.q > 0;
+end $$;
+revoke execute on function public.compras__refresh_media_sushi() from public, anon, authenticated;
