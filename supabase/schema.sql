@@ -448,6 +448,13 @@ begin
     end if;
   end loop;
   update public.compras_price_history set product_id = p_into where product_id = p_from;
+  update public.compras_purchase_lines set product_id = p_into where product_id = p_from;
+  update public.compras_recipe_items set product_id = p_into where product_id = p_from;
+  update public.compras_recipe_aliases set product_id = p_into where product_id = p_from;
+  update public.compras_zs_items set product_id = p_into where product_id = p_from;
+  insert into public.compras_stock_count_lines (count_id, product_id, setor, qty, updated_by, updated_at)
+    select count_id, p_into, setor, qty, updated_by, updated_at from public.compras_stock_count_lines where product_id = p_from
+    on conflict (count_id, product_id, setor) do update set qty = public.compras_stock_count_lines.qty + excluded.qty;
   delete from public.compras_products where id = p_from;
 end $function$
 ;
@@ -620,6 +627,9 @@ begin
       end if;
     end if;
     insert into public.compras_price_history (product_id, supplier_id, data, unit_price, invoice_id) values (pid, sid, d, up, inv);
+    if nullif(l->>'qty','') is not null then
+      insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, (l->>'qty')::numeric * pq);
+    end if;
     select * into prev from public.compras_offers o where o.product_id = pid and o.supplier_id = sid;
     if not found then
       insert into public.compras_offers (product_id, supplier_id, alias, codigo, pack_qty, pack_price, unit_price, prev_unit_price, data, invoice_id)
@@ -1007,3 +1017,284 @@ begin
   return jsonb_build_object('atualizadas', n);
 end $function$
 ;
+
+-- ============================================================
+-- Stock e vendas (ZSbms)
+-- ============================================================
+alter table public.compras_settings add column if not exists stock_inicio date not null default date '2026-11-12';
+
+-- Entradas: linhas de fatura já ligadas ao produto, em unidades base (kg / L / un)
+create table if not exists public.compras_purchase_lines (
+  id bigserial primary key,
+  invoice_id uuid references public.compras_invoices(id) on delete cascade,
+  product_id uuid not null references public.compras_products(id) on delete cascade,
+  data date not null,
+  qty numeric not null
+);
+create index if not exists compras_purchase_lines_prod_idx on public.compras_purchase_lines(product_id, data);
+alter table public.compras_purchase_lines enable row level security;
+
+-- Artigos vendidos no ZSbms e a que receita / produto correspondem
+create table if not exists public.compras_zs_items (
+  codigo int primary key,
+  descricao text not null default '',
+  recipe_guara_id text,                -- receita do Guará consumida por cada venda
+  product_id uuid references public.compras_products(id) on delete set null,  -- ou produto vendido tal e qual
+  fator numeric not null default 1,    -- receitas (ou unidades do produto) por cada venda
+  ignorar boolean not null default false,  -- menus cujos componentes já vêm em linhas próprias, taxas, etc.
+  revisto boolean not null default false,
+  atualizado_em timestamptz default now()
+);
+alter table public.compras_zs_items enable row level security;
+
+-- Vendas por dia e artigo (somadas a partir dos documentos do ZSbms; NC a subtrair, anulados fora)
+create table if not exists public.compras_sales (
+  dia date not null,
+  codigo int not null,
+  descricao text not null default '',
+  qtd numeric not null default 0,
+  total numeric not null default 0,
+  primary key (dia, codigo)
+);
+alter table public.compras_sales enable row level security;
+
+-- Contagens de stock
+create table if not exists public.compras_stock_counts (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  created_by uuid references public.compras_users(id) on delete set null,
+  fechada_em timestamptz,
+  fechada_por uuid references public.compras_users(id) on delete set null,
+  resultado jsonb
+);
+create unique index if not exists compras_stock_counts_aberta on public.compras_stock_counts ((true)) where fechada_em is null;
+alter table public.compras_stock_counts enable row level security;
+
+create table if not exists public.compras_stock_count_lines (
+  count_id uuid not null references public.compras_stock_counts(id) on delete cascade,
+  product_id uuid not null references public.compras_products(id) on delete cascade,
+  setor text not null,
+  qty numeric not null,
+  updated_by uuid references public.compras_users(id) on delete set null,
+  updated_at timestamptz not null default now(),
+  primary key (count_id, product_id, setor)
+);
+alter table public.compras_stock_count_lines enable row level security;
+
+-- Quanto vale 1 unidade do produto nas receitas do Guará (ex.: Frize garrafa = 250 ml na receita)
+alter table public.compras_products add column if not exists receita_fator numeric not null default 1 check (receita_fator > 0);
+-- Acompanhamentos que o ZSbms regista em linha própria (não contam dentro do prato)
+alter table public.compras_recipes add column if not exists acompanhamento boolean not null default false;
+
+-- Quantidade efetiva de uma linha de receita: o Guará às vezes traz gramas/ml marcados como "un"
+create or replace function public.compras__item_qty(i public.compras_recipe_items) returns numeric
+language sql stable set search_path to 'public' as $$
+  select case when i.unidade = 'un' and coalesce(i.qty,0) >= 5 and coalesce(
+           (select p.unidade from public.compras_products p where p.id = i.product_id),
+           (select s.rendimento_unidade from public.compras_recipes s where s.guara_id = i.sub_recipe_guara_id)) in ('kg','L')
+         then i.qty / 1000 else coalesce(i.qty, 0) end
+$$;
+
+-- Quanto de cada produto gasta UMA receita inteira do Guará (sub-receitas até 6 níveis; acompanhamentos vendidos à parte não entram)
+create or replace function public.compras__recipe_usage()
+returns table(root text, product_id uuid, qty numeric)
+language sql stable set search_path to 'public' as $$
+  with recursive u(root, cur, f, depth) as (
+    select r.guara_id, r.guara_id, 1::numeric, 0 from public.compras_recipes r
+    union all
+    select u.root, i.sub_recipe_guara_id, u.f * public.compras__item_qty(i) / coalesce(nullif(s.rendimento,0),1), u.depth + 1
+      from u
+      join public.compras_recipes r on r.guara_id = u.cur
+      join public.compras_recipe_items i on i.recipe_id = r.id and i.sub_recipe_guara_id is not null
+      join public.compras_recipes s on s.guara_id = i.sub_recipe_guara_id and not s.acompanhamento
+     where u.depth < 6
+  )
+  select u.root, i.product_id, sum(u.f * public.compras__item_qty(i) / p.receita_fator)
+    from u
+    join public.compras_recipes r on r.guara_id = u.cur
+    join public.compras_recipe_items i on i.recipe_id = r.id and i.product_id is not null
+    join public.compras_products p on p.id = i.product_id
+   group by 1, 2
+$$;
+
+-- Consumo teórico por produto e dia, a partir das vendas
+create or replace function public.compras__consumption()
+returns table(product_id uuid, dia date, qty numeric)
+language sql stable set search_path to 'public' as $$
+  with use as (select * from public.compras__recipe_usage())
+  select x.product_id, s.dia, sum(s.qtd * z.fator * x.q)
+    from public.compras_sales s
+    join public.compras_zs_items z on z.codigo = s.codigo and not z.ignorar
+    join lateral (
+      select z.product_id as product_id, 1::numeric as q where z.product_id is not null
+      union all
+      select use.product_id, use.qty from use where z.recipe_guara_id is not null and use.root = z.recipe_guara_id
+    ) x on true
+   group by 1, 2
+$$;
+
+-- Stock calculado de cada produto: última contagem (ou 0 no início) + entradas (faturas) − saídas (vendas × receitas)
+create or replace function public.compras__stock_rows()
+returns table(product_id uuid, base date, base_q numeric, contado boolean, entradas numeric, saidas numeric, stock numeric, consumo_dia numeric)
+language sql stable set search_path to 'public' as $$
+  with ini as (select coalesce((select stock_inicio from public.compras_settings where id = 1), current_date) d),
+  lastc as (
+    select distinct on (l.product_id) l.product_id, c.id cid, c.created_at::date d
+      from public.compras_stock_count_lines l join public.compras_stock_counts c on c.id = l.count_id
+     where c.fechada_em is not null
+     order by l.product_id, c.created_at desc),
+  lc as (select lastc.product_id, lastc.d, (select sum(qty) from public.compras_stock_count_lines x where x.count_id = lastc.cid and x.product_id = lastc.product_id) q from lastc),
+  cons as materialized (select * from public.compras__consumption()),
+  win as (select max(dia) mx, greatest(1, count(distinct dia) filter (where dia > (select max(dia) from public.compras_sales) - 28)) nd from public.compras_sales),
+  b as (
+    select p.id, coalesce(lc.d, (select d from ini)) base, coalesce(lc.q, 0) base_q, lc.d is not null contado
+      from public.compras_products p left join lc on lc.product_id = p.id)
+  select b.id, b.base, b.base_q, b.contado,
+         coalesce(e.q, 0), coalesce(s.q, 0), b.base_q + coalesce(e.q, 0) - coalesce(s.q, 0),
+         coalesce(c.q, 0) / (select nd from win)
+    from b
+    left join lateral (select sum(pl.qty) q from public.compras_purchase_lines pl where pl.product_id = b.id and pl.data >= b.base) e on true
+    left join lateral (select sum(cons.qty) q from cons where cons.product_id = b.id and cons.dia >= b.base) s on true
+    left join lateral (select sum(cons.qty) q from cons where cons.product_id = b.id and cons.dia > (select mx from win) - 28) c on true
+$$;
+
+create or replace function public.compras_stock(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  return jsonb_build_object(
+    'inicio', (select stock_inicio from public.compras_settings where id = 1),
+    'vendas_ate', (select max(dia) from public.compras_sales),
+    'vendas_desde', (select min(dia) from public.compras_sales),
+    'sem_receita', (select count(*) from public.compras_zs_items z where not z.ignorar and z.recipe_guara_id is null and z.product_id is null
+                      and exists (select 1 from public.compras_sales s where s.codigo = z.codigo and s.dia > current_date - 35)),
+    'contagem_aberta', (select c.id from public.compras_stock_counts c where c.fechada_em is null),
+    'ultima_contagem', (select max(fechada_em) from public.compras_stock_counts),
+    'produtos', coalesce((select jsonb_agg(jsonb_build_object('id', r.product_id, 'base', r.base, 'base_q', round(r.base_q, 3), 'contado', r.contado,
+                 'entradas', round(r.entradas, 3), 'saidas', round(r.saidas, 3), 'stock', round(r.stock, 3), 'consumo_dia', round(r.consumo_dia, 4)))
+                 from public.compras__stock_rows() r
+                where r.entradas <> 0 or r.saidas <> 0 or r.contado or r.consumo_dia <> 0), '[]'::jsonb));
+end $function$;
+
+-- Vendas do ZSbms (substitui os dias enviados)
+create or replace function public.compras_import_sales(p_token text, p_rows jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; n int; nd int;
+begin
+  u := public.compras__chefe(p_token);
+  delete from public.compras_sales where dia in (select distinct (x->>'dia')::date from jsonb_array_elements(coalesce(p_rows,'[]')) x);
+  get diagnostics nd = row_count;
+  insert into public.compras_sales (dia, codigo, descricao, qtd, total)
+  select (x->>'dia')::date, (x->>'codigo')::int, max(coalesce(x->>'descricao','')), sum(coalesce((x->>'qtd')::numeric,0)), sum(coalesce((x->>'total')::numeric,0))
+    from jsonb_array_elements(coalesce(p_rows,'[]')) x
+   where nullif(x->>'dia','') is not null and nullif(x->>'codigo','') is not null
+   group by 1, 2;
+  get diagnostics n = row_count;
+  insert into public.compras_zs_items (codigo, descricao)
+  select distinct on ((x->>'codigo')::int) (x->>'codigo')::int, coalesce(x->>'descricao','')
+    from jsonb_array_elements(coalesce(p_rows,'[]')) x where nullif(x->>'codigo','') is not null
+  on conflict (codigo) do update set descricao = excluded.descricao;
+  return jsonb_build_object('linhas', n, 'substituidas', nd);
+end $function$;
+
+-- Contagens
+create or replace function public.compras_count_get(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; c public.compras_stock_counts;
+begin
+  u := public.compras__user(p_token);
+  select * into c from public.compras_stock_counts where fechada_em is null;
+  if not found then
+    return jsonb_build_object('aberta', null,
+      'ultima', (select jsonb_build_object('id', x.id, 'data', x.created_at, 'fechada_em', x.fechada_em, 'resultado', x.resultado)
+                   from public.compras_stock_counts x where x.fechada_em is not null order by x.fechada_em desc limit 1));
+  end if;
+  return jsonb_build_object('aberta', jsonb_build_object('id', c.id, 'data', c.created_at,
+    'linhas', coalesce((select jsonb_agg(jsonb_build_object('product_id', l.product_id, 'setor', l.setor, 'qty', l.qty,
+                 'por', (select nome from public.compras_users where id = l.updated_by), 'em', l.updated_at))
+               from public.compras_stock_count_lines l where l.count_id = c.id), '[]'::jsonb)));
+end $function$;
+
+create or replace function public.compras_count_start(p_token text) returns uuid
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; cid uuid;
+begin
+  u := public.compras__chefe(p_token);
+  select id into cid from public.compras_stock_counts where fechada_em is null;
+  if cid is null then
+    insert into public.compras_stock_counts (created_by) values (u.id) returning id into cid;
+  end if;
+  return cid;
+end $function$;
+
+create or replace function public.compras_count_set(p_token text, p_count uuid, p_product uuid, p_setor text, p_qty numeric) returns void
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  if not exists (select 1 from public.compras_stock_counts where id = p_count and fechada_em is null) then raise exception 'contagem_fechada'; end if;
+  if p_setor not in ('cozinha','sushi','bar','takeaway') then raise exception 'setor_invalido'; end if;
+  if p_qty is null then
+    delete from public.compras_stock_count_lines where count_id = p_count and product_id = p_product and setor = p_setor;
+  else
+    if p_qty < 0 then raise exception 'quantidade_invalida'; end if;
+    insert into public.compras_stock_count_lines (count_id, product_id, setor, qty, updated_by, updated_at)
+    values (p_count, p_product, p_setor, p_qty, u.id, now())
+    on conflict (count_id, product_id, setor) do update set qty = excluded.qty, updated_by = excluded.updated_by, updated_at = now();
+  end if;
+end $function$;
+
+create or replace function public.compras_count_close(p_token text, p_count uuid) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; res jsonb;
+begin
+  u := public.compras__chefe(p_token);
+  if not exists (select 1 from public.compras_stock_counts where id = p_count and fechada_em is null) then raise exception 'contagem_fechada'; end if;
+  select coalesce(jsonb_agg(jsonb_build_object('product_id', l.product_id, 'contado', l.q, 'esperado', round(coalesce(r.stock, 0), 3))), '[]'::jsonb)
+    into res
+    from (select product_id, sum(qty) q from public.compras_stock_count_lines where count_id = p_count group by 1) l
+    left join public.compras__stock_rows() r on r.product_id = l.product_id;
+  update public.compras_stock_counts set fechada_em = now(), fechada_por = u.id, resultado = res where id = p_count;
+  return res;
+end $function$;
+
+create or replace function public.compras_count_cancel(p_token text, p_count uuid) returns void
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  delete from public.compras_stock_counts where id = p_count and fechada_em is null;
+end $function$;
+
+-- Artigos do ZSbms e ligações (para o chefe rever)
+create or replace function public.compras_zs_items(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  return coalesce((select jsonb_agg(jsonb_build_object('codigo', z.codigo, 'descricao', z.descricao, 'recipe_guara_id', z.recipe_guara_id,
+      'receita', r.nome, 'product_id', z.product_id, 'fator', z.fator, 'ignorar', z.ignorar,
+      'vendidos', (select sum(qtd) from public.compras_sales s where s.codigo = z.codigo and s.dia > current_date - 35)) order by z.descricao)
+    from public.compras_zs_items z left join public.compras_recipes r on r.guara_id = z.recipe_guara_id), '[]'::jsonb);
+end $function$;
+
+create or replace function public.compras_zs_map(p_token text, p_list jsonb) returns int
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; x jsonb; n int := 0;
+begin
+  u := public.compras__chefe(p_token);
+  for x in select * from jsonb_array_elements(coalesce(p_list,'[]')) loop
+    update public.compras_zs_items set
+      recipe_guara_id = case when x ? 'recipe_guara_id' then nullif(x->>'recipe_guara_id','') else recipe_guara_id end,
+      product_id = case when x ? 'product_id' then nullif(x->>'product_id','')::uuid else product_id end,
+      fator = coalesce(nullif(x->>'fator','')::numeric, fator),
+      ignorar = coalesce((x->>'ignorar')::boolean, ignorar),
+      revisto = true, atualizado_em = now()
+     where codigo = (x->>'codigo')::int;
+    n := n + 1;
+  end loop;
+  return n;
+end $function$;
+
+revoke execute on function public.compras__recipe_usage(), public.compras__consumption(), public.compras__stock_rows(), public.compras__item_qty(public.compras_recipe_items) from public, anon, authenticated;

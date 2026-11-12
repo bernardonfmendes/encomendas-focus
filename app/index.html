@@ -192,6 +192,13 @@ input,select,textarea{font-size:16px!important}
 .pl.pop .stepper,.pl.pop .addbtn{animation:pop .35s ease-out}
 @keyframes pop{0%{transform:scale(.8)}60%{transform:scale(1.12)}100%{transform:scale(1)}}
 @media (prefers-reduced-motion:reduce){.pl.pop .stepper,.pl.pop .addbtn{animation:none}}
+.stk{font-size:12.5px;color:var(--muted);margin-top:2px}.stk b{color:var(--ink);font-weight:600}.stk .neg{color:var(--bad)}.stk .low{color:var(--warn)}
+.slist{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.srow2{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--line)}.srow2:first-child{border-top:0}
+.srow2 .sn{flex:1;min-width:0}.srow2 .sn b{display:block;font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.srow2 .sn small{color:var(--muted)}
+.srow2 .sq{font-variant-numeric:tabular-nums;font-weight:700;text-align:right;white-space:nowrap}.srow2 .sq.neg{color:var(--bad)}.srow2 .sq.low{color:var(--warn)}
+.cin{width:92px;text-align:right;font-variant-numeric:tabular-nums}.cin.done{background:var(--good-soft);border-color:var(--good)}
+.cnthd{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:12px 2px 6px;font-weight:700}
 .habh{margin:14px 0 8px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .pbar{height:7px;border-radius:99px;background:var(--line);overflow:hidden}
 .pbar i{display:block;height:100%;background:var(--warn);border-radius:99px;transition:width .3s}
@@ -237,6 +244,7 @@ input,select,textarea{font-size:16px!important}
         <a href="#encomendar" data-view="encomendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Encomendar</a>
         <a href="#carrinho" data-view="carrinho"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 12.4a1 1 0 0 0 1 .8h9.8a1 1 0 0 0 1-.8L21 7H6"/></svg>Carrinho <span class="count" id="cntCart" hidden></span></a>
         <a href="#pedidos" data-view="pedidos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M9 13l2 2 4-4"/></svg>Pedidos <span class="count" id="cntPend" hidden></span></a>
+        <a href="#stock" data-view="stock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>Stock</a>
         <a href="#faturas" data-view="faturas" data-chefe hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/></svg>Faturas <span class="count" id="cntDraft" hidden></span></a>
         <a href="#gestao" data-view="gestao" data-chefe hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>Gestão</a>
       </nav>
@@ -309,7 +317,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:""
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, showDiff:false
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -392,6 +400,7 @@ async function start(){
   saveCart();
   await Promise.all([loadCatalog(), loadOrders()]);
   if (isChefe()) { loadInvoices(); await loadDrafts(); }
+  loadStock().then(schedule);
   route();
   pushState().then(schedule);
 }
@@ -405,6 +414,13 @@ async function loadDrafts(){
 async function loadCatalog(){
   try { const c = await rpc("compras_catalog", {p_token:S.token}); S.products = c.products || []; S.suppliers = c.suppliers || []; S.me.restaurante = c.restaurante; ls.set("cf_cat", c); }
   catch(e){ if (!S.products.length) { const c = ls.get("cf_cat", null); if (c) { S.products = c.products || []; S.suppliers = c.suppliers || []; S.me.restaurante = c.restaurante; } } }
+}
+async function loadStock(){
+  try {
+    const [st, ct] = await Promise.all([rpc("compras_stock", {p_token:S.token}), rpc("compras_count_get", {p_token:S.token})]);
+    S.stock = st; S.count = ct; S.stockById = {}; (st.produtos || []).forEach(x => S.stockById[x.id] = x); ls.set("cf_stock", st);
+    if (!(ct && ct.aberta)) S.counting = false;
+  } catch(e){ if (!S.stock) { const c = ls.get("cf_stock", null); if (c) { S.stock = c; S.stockById = {}; (c.produtos || []).forEach(x => S.stockById[x.id] = x); } } }
 }
 async function loadOrders(){
   try {
@@ -434,10 +450,11 @@ function schedule(){
 document.addEventListener("focusout", () => { if (deferred) { deferred = false; setTimeout(schedule, 0); } });
 function route(){
   const h = (location.hash || "").slice(1);
-  const ok = ["encomendar","carrinho","pedidos"].concat(isChefe() ? ["faturas","gestao"] : []);
+  const ok = ["encomendar","carrinho","pedidos","stock"].concat(isChefe() ? ["faturas","gestao"] : []);
   S.view = ok.includes(h) ? h : "encomendar";
   if (S.view !== "encomendar") S.editProd = null;
   if (S.view === "gestao") loadUsers().then(schedule);
+  if (S.view === "stock") loadStock().then(schedule); else S.counting = false;
   render(); window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", () => { if (S.me) route(); });
@@ -481,7 +498,7 @@ function render(){
   const el = $("#view");
   if (S.pinForm) { el.innerHTML = viewPin(); return; }
   el.innerHTML = S.view === "encomendar" ? viewShop() : S.view === "carrinho" ? viewCart() : S.view === "pedidos" ? viewOrders()
-    : S.view === "faturas" ? viewInvoices() : S.view === "gestao" ? viewGestao() : "";
+    : S.view === "faturas" ? viewInvoices() : S.view === "gestao" ? viewGestao() : S.view === "stock" ? viewStock() : "";
 }
 
 function viewPin(){
@@ -573,7 +590,7 @@ function prodCard(p){
       if (d >= 3) ch = ` <span class="tag up">↑${num(d,0)}%</span>`; else if (d <= -3) ch = ` <span class="tag down">↓${num(-d,0)}%</span>`; }
     const isPack = Number(o.pack_qty) !== 1;
     return `<div class="pl${S.pop === key ? " pop" : ""}">${main ? `<span class="pico" aria-hidden="true">${CAT_ICON[p.categoria] || "🛒"}</span>` : ""}<div class="pinfo">${main ? `<div class="pname">${esc(p.nome)}${inSite(p) ? "" : `<span class="stag">outro sítio</span>`}${isChefe() ? `<button class="edit" data-action="edit-prod" data-p="${p.id}" aria-label="Editar ${esc(p.nome)}">✎</button>` : ""}</div>` : ""}
-      <div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}</div></div>
+      ${main ? stockHint(p) : ""}<div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}</div></div>
       ${qty ? stepper(key, qty, stepOf(o.pack_qty, bu), qLabel(o.pack_qty, bu)) : `<button class="addbtn" data-action="inc" data-k="${esc(key)}" aria-label="Adicionar ${esc(p.nome)} (${esc(s.nome || "")})">+</button>`}</div>`;
   };
   const inCart = offs.some(o => S.cart[keyOf(o)] > 0);
@@ -676,6 +693,74 @@ function orderCard(o){
   if (o.status !== "rejeitada") h += `<button class="small" style="align-self:flex-start" data-action="repeat" data-o="${o.id}">↻ Repetir esta encomenda</button>`;
   if (isChefe()) h += `<button class="link" style="align-self:flex-start;color:var(--bad)" data-action="del-order" data-o="${o.id}">${S.confirmDelOrder === o.id ? "Confirmar: apagar encomenda" : "Apagar encomenda"}</button>`;
   return `<section class="group ocard${open ? "" : " closed"}">${head}${open ? h + `</footer>` : ""}</section>`;
+}
+
+// ---------- stock ----------
+const qFmt = (q, u) => { const d = u === "un" ? (Math.abs(q) < 10 ? 1 : 0) : (Math.abs(q) < 10 ? 2 : 1); return num(q, d) + " " + (u || "un"); };
+function stockInfo(p){
+  const x = S.stockById[p.id]; if (!x) return null;
+  const st = Number(x.stock) || 0, cd = Number(x.consumo_dia) || 0;
+  const dias = cd > 0 ? st / cd : null;
+  const cls = st < 0 ? "neg" : (dias !== null && dias < 3 ? "low" : "");
+  return {st, cd, dias, cls, x};
+}
+function stockHint(p){
+  const i = stockInfo(p); if (!i) return "";
+  const u = p.unidade || "un"; const need = i.cd * 7 - i.st;
+  return `<div class="stk">Stock <b class="${i.cls}">${esc(qFmt(i.st, u))}</b>${i.cd > 0 ? ` · gasta ~${esc(qFmt(i.cd * 7, u))}/semana${need > 0 ? ` · para 7 dias faltam ~${esc(qFmt(need, u))}` : ""}` : ""}</div>`;
+}
+function viewStock(){
+  const st = S.stock;
+  if (!st) return `<div class="card empty"><h3>A carregar o stock…</h3></div>`;
+  if (S.counting && S.count && S.count.aberta) return viewCount();
+  const ab = S.count && S.count.aberta; const ult = S.count && S.count.ultima;
+  let h = `<h2 style="margin-bottom:4px">Stock</h2><p class="lead">Faturas que entraram menos o que se gastou nas vendas (receitas do Guará).${st.vendas_ate ? ` Vendas até ${fmtDate(st.vendas_ate)}.` : " Ainda sem vendas importadas."}</p>`;
+  if (ab) h += `<div class="banner row" style="justify-content:space-between;margin-bottom:12px"><span>Contagem a decorrer desde ${fmtDate(ab.data)} · ${(ab.linhas || []).length} registos</span><button class="small primary" data-action="count-go">Contar</button></div>`;
+  else if (isChefe()) h += `<div class="row" style="margin-bottom:12px"><button class="primary" data-action="count-start">Começar contagem</button><small class="muted">Uma vez por mês. Todos podem ajudar a contar.</small></div>`;
+  if (ult && ult.resultado && ult.resultado.length) {
+    const diffs = ult.resultado.map(r => ({...r, p:prodById(r.product_id), d:(Number(r.contado)||0) - (Number(r.esperado)||0)})).filter(r => r.p && Math.abs(r.d) > 0.0005).sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+    h += `<div class="card stack" style="margin-bottom:12px"><div class="row" style="justify-content:space-between"><b>Última contagem: ${fmtDate(ult.data)}</b><button class="small" data-action="count-diff">${S.showDiff ? "Esconder" : "Ver diferenças"}</button></div>`
+      + (S.showDiff ? (diffs.length ? `<small class="muted">Contado menos o que a app esperava. Negativo = faltou (quebras, porções maiores, vendas sem receita).</small><div class="slist">` + diffs.map(r => `<div class="srow2"><div class="sn"><b>${esc(r.p.nome)}</b><small>esperado ${esc(qFmt(Number(r.esperado)||0, r.p.unidade))} · contado ${esc(qFmt(Number(r.contado)||0, r.p.unidade))}</small></div><span class="sq ${r.d < 0 ? "neg" : ""}">${r.d > 0 ? "+" : ""}${esc(qFmt(r.d, r.p.unidade))}</span></div>`).join("") + `</div>` : `<small class="muted">Sem diferenças.</small>`) : "") + `</div>`;
+  }
+  if (isChefe() && st.sem_receita) h += `<p class="muted" style="margin:0 0 10px"><small>${st.sem_receita} artigos vendidos no ZSbms ainda não têm receita, por isso não descontam stock.</small></p>`;
+  h += `<div class="srow" style="margin-bottom:8px"><input id="stockSearch" type="search" placeholder="Procurar produto" value="${esc(S.stockQ)}" autocomplete="off" aria-label="Procurar produto no stock"></div>`;
+  const F = [["todos","Todos"],["acabar","A acabar"],["parados","Sem vendas"]];
+  h += `<div class="chips">${F.map(([k, n]) => `<button class="chip" data-action="stock-f" data-f="${k}" aria-pressed="${S.stockF === k}">${n}</button>`).join("")}</div>`;
+  const q = norm(S.stockQ);
+  let list = S.products.map(p => ({p, i:stockInfo(p)})).filter(r => r.i && (!q || norm(r.p.nome).includes(q)));
+  if (S.stockF === "acabar") list = list.filter(r => r.i.cd > 0 && (r.i.st <= 0 || (r.i.dias !== null && r.i.dias < 4))).sort((a, b) => (a.i.dias ?? 0) - (b.i.dias ?? 0));
+  else if (S.stockF === "parados") list = list.filter(r => r.i.cd === 0);
+  else list.sort((a, b) => (a.p.categoria || "").localeCompare(b.p.categoria || "") || a.p.nome.localeCompare(b.p.nome));
+  if (!list.length) return h + `<p class="muted">${q ? "Nenhum produto encontrado." : "Nada nesta lista."}</p>`;
+  let cat = null; h += `<div class="stack" style="gap:0">`; let open = false;
+  for (const {p, i} of list) {
+    if (S.stockF === "todos" && p.categoria !== cat) { if (open) h += `</div>`; cat = p.categoria; h += `<div class="cnthd">${esc(cat || "Outros")}</div><div class="slist">`; open = true; }
+    else if (!open) { h += `<div class="slist">`; open = true; }
+    const u = p.unidade || "un";
+    h += `<div class="srow2"><div class="sn"><b>${esc(p.nome)}</b><small>${i.cd > 0 ? `gasta ~${esc(qFmt(i.cd * 7, u))}/semana${i.dias !== null && i.st > 0 ? ` · dá para ${num(i.dias, 0)} ${Math.round(i.dias) === 1 ? "dia" : "dias"}` : ""}` : "sem vendas registadas"}${i.x.contado ? ` · contado ${fmtDate(i.x.base)}` : ""}</small></div><span class="sq ${i.cls}">${esc(qFmt(i.st, u))}</span></div>`;
+  }
+  return h + (open ? `</div>` : "") + `</div><p class="muted" style="margin-top:10px"><small>Começou a zero em ${fmtDate(st.inicio)}. Até à primeira contagem, o stock que já estava nas prateleiras não aparece.</small></p>`;
+}
+function countVal(pid, setor){ const l = ((S.count && S.count.aberta && S.count.aberta.linhas) || []).find(x => x.product_id === pid && x.setor === setor); return l ? l.qty : null; }
+function viewCount(){
+  const ab = S.count.aberta; const setor = S.setor;
+  let h = `<div class="row" style="justify-content:space-between;margin-bottom:6px"><h2>Contagem</h2><button class="small" data-action="count-back">Voltar</button></div>
+    <p class="lead">Escreva quanto há de cada produto em ${esc(setorNome(setor))}. Grava sozinho. Deixe vazio o que não contou.</p>
+    <div class="seg" id="countbar" role="group" aria-label="Sítio" style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:3px;margin-bottom:8px">${SETORES.map(([k, n]) => { const c = (ab.linhas || []).filter(l => l.setor === k).length; return `<button class="chip" style="border:0;border-radius:9px;justify-content:center;${setor === k ? "background:var(--accent);color:var(--on-accent)" : "background:none"}" data-action="setor" data-s="${k}" aria-pressed="${setor === k}">${n}${c ? ` <small>(${c})</small>` : ""}</button>`; }).join("")}</div>
+    <div class="srow" style="margin-bottom:8px"><input id="countSearch" type="search" placeholder="Procurar produto" value="${esc(S.countQ)}" autocomplete="off" aria-label="Procurar produto a contar"></div>`;
+  const q = norm(S.countQ);
+  const list = S.products.filter(p => inSite(p) && (!q || norm(p.nome).includes(q))).sort((a, b) => (a.categoria || "").localeCompare(b.categoria || "") || a.nome.localeCompare(b.nome));
+  let cat = null, open = false;
+  for (const p of list) {
+    if (p.categoria !== cat) { if (open) h += `</div>`; cat = p.categoria; h += `<div class="cnthd">${esc(cat || "Outros")}</div><div class="slist">`; open = true; }
+    const v = countVal(p.id, setor);
+    h += `<div class="srow2"><div class="sn"><b>${esc(p.nome)}</b><small>em ${esc(p.unidade || "un")}</small></div><input class="cin${v !== null ? " done" : ""}" data-p="${p.id}" value="${v !== null ? esc(num(v, 3)) : ""}" inputmode="decimal" placeholder="—" aria-label="Quantidade de ${esc(p.nome)} em ${esc(p.unidade || "un")}"></div>`;
+  }
+  if (open) h += `</div>`;
+  if (!list.length) h += `<p class="muted">Nenhum produto encontrado.</p>`;
+  if (isChefe()) h += `<div class="card stack" style="margin-top:14px"><b>Terminar</b><small class="muted">Ao fechar, o stock de cada produto contado passa a ser o que se contou (soma dos sítios). Os produtos não contados ficam com o valor calculado.</small>
+    <div class="row"><button class="primary" data-action="count-close">${S.confirmClose ? "Confirmar: fechar contagem" : "Fechar contagem"}</button><button class="small danger" data-action="count-cancel">${S.confirmCancel ? "Confirmar: apagar contagem" : "Apagar contagem"}</button></div></div>`;
+  return h;
 }
 
 // ---------- invoices ----------
@@ -927,6 +1012,21 @@ document.addEventListener("click", async ev => {
       await rpc("compras_order_decide", {p_token:S.token, p_id:o.id, p_status:"rejeitada", p_items:(S.edits[o.id] || o.items), p_entrega:null, p_motivo:motivo});
       S.rejecting = null; S.rejText = ""; delete S.edits[o.id]; await loadOrders(); render(); toast("Pedido rejeitado. O colaborador recebe o motivo."); pushNotify("decisao", {order_id:o.id});
     }
+    else if (a === "stock-f") { S.stockF = b.dataset.f; render(); }
+    else if (a === "count-diff") { S.showDiff = !S.showDiff; render(); }
+    else if (a === "count-go") { S.counting = true; S.countQ = ""; render(); window.scrollTo(0, 0); }
+    else if (a === "count-back") { S.counting = false; S.confirmClose = S.confirmCancel = false; await loadStock(); render(); window.scrollTo(0, 0); }
+    else if (a === "count-start") { b.disabled = true; await rpc("compras_count_start", {p_token:S.token}); await loadStock(); S.counting = true; render(); window.scrollTo(0, 0); toast("Contagem aberta. Toda a equipa pode contar."); }
+    else if (a === "count-close") {
+      if (!S.confirmClose) { S.confirmClose = true; S.confirmCancel = false; render(); return; }
+      b.disabled = true; await rpc("compras_count_close", {p_token:S.token, p_count:S.count.aberta.id});
+      S.confirmClose = false; S.counting = false; S.showDiff = true; await loadStock(); render(); window.scrollTo(0, 0); toast("Contagem fechada. O stock foi acertado.");
+    }
+    else if (a === "count-cancel") {
+      if (!S.confirmCancel) { S.confirmCancel = true; S.confirmClose = false; render(); return; }
+      b.disabled = true; await rpc("compras_count_cancel", {p_token:S.token, p_count:S.count.aberta.id});
+      S.confirmCancel = false; S.counting = false; await loadStock(); render(); toast("Contagem apagada.");
+    }
     else if (a === "toggle-order") { S.openOrd[b.dataset.o] = !S.openOrd[b.dataset.o]; render(); }
     else if (a === "undo-cart") { if (S.undo) { S.cart = S.undo; S.undo = null; saveCart(); $("#toast").hidden = true; render(); } }
     else if (a === "submit-cart") {
@@ -1064,6 +1164,7 @@ document.addEventListener("input", ev => {
   const t = ev.target;
   if (t.id && t.id.startsWith("rej-")) { S.rejText = t.value; return; }
   if (t.id === "search") { S.search = t.value; render(); return; }
+  if (t.id === "stockSearch" || t.id === "countSearch") { S[t.id === "stockSearch" ? "stockQ" : "countQ"] = t.value; const pos = t.selectionStart; render(); const n = document.getElementById(t.id); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch(e){} } return; }
   if (t.dataset.rv && S.review && t.tagName === "INPUT") { S.review[t.dataset.rv] = t.value; return; }
   if (t.dataset.ln != null && S.review && t.tagName === "INPUT" && t.type !== "checkbox") {
     const l = S.review.lines[+t.dataset.ln]; l[t.dataset.f] = t.value;
@@ -1074,12 +1175,26 @@ document.addEventListener("change", ev => {
   const t = ev.target;
   if (t.id === "files") { const arr = [...t.files].slice(0, 5); S.previews.forEach(u => u && URL.revokeObjectURL(u)); S.files = arr; S.previews = arr.map(f => f.type === "application/pdf" ? null : URL.createObjectURL(f)); S.readMsg = t.files.length > 5 ? "Só os primeiros 5 ficheiros serão lidos." : ""; render(); return; }
   if (t.classList.contains("qin")) { const st = Number(t.dataset.st) || 1; let v = parseNum(t.value); if (isFinite(v) && st >= 1) v = Math.round(v); if (isFinite(v) && v > 0) { S.cart[t.dataset.k] = Math.round(v * 1000) / 1000; saveCart(); render(); } else { const prev = {...S.cart}; delete S.cart[t.dataset.k]; saveCart(); render(); undoToast("Produto retirado.", prev); } return; }
+  if (t.classList.contains("cin")) { countSave(t); return; }
   if (t.id === "search") { const v = t.value.trim(); if (v.length >= 2) { const r = [v, ...ls.get("cf_recent", []).filter(x => x !== v)].slice(0, 6); ls.set("cf_recent", r); fillRecent(); } return; }
   if (t.dataset.deliv) { S.deliv[t.dataset.deliv] = t.value; return; }
   if (t.dataset.rv && S.review) { S.review[t.dataset.rv] = t.value; if (t.dataset.rv === "supplierId") render(); return; }
   if (t.dataset.ln != null && S.review) { const l = S.review.lines[+t.dataset.ln]; l[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value; if (["productId","include","baseUnit"].includes(t.dataset.f)) render(); }
 });
 
+async function countSave(t){
+  const ab = S.count && S.count.aberta; if (!ab) return;
+  const raw = t.value.trim(); let v = raw === "" ? null : parseNum(raw);
+  if (v !== null && !(isFinite(v) && v >= 0)) { toast("Quantidade inválida."); t.value = ""; return; }
+  if (v !== null) v = Math.round(v * 1000) / 1000;
+  const pid = t.dataset.p, setor = S.setor;
+  try {
+    await rpc("compras_count_set", {p_token:S.token, p_count:ab.id, p_product:pid, p_setor:setor, p_qty:v});
+    ab.linhas = (ab.linhas || []).filter(l => !(l.product_id === pid && l.setor === setor));
+    if (v !== null) ab.linhas.push({product_id:pid, setor, qty:v, por:S.me.nome});
+    t.classList.toggle("done", v !== null);
+  } catch(e){ toast(e.message === "contagem_fechada" ? "A contagem já foi fechada." : "Não gravou. Tente outra vez."); }
+}
 function fillRecent(){ const d = document.getElementById("recentSearches"); if (d) d.innerHTML = ls.get("cf_recent", []).map(x => `<option value="${esc(x)}">`).join(""); }
 fillRecent();
 // ---------- boot ----------

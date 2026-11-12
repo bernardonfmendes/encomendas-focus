@@ -8,4 +8,8 @@
 - O mesmo projeto Supabase tem a app de finanças pessoais (outras tabelas). Não mexer em nada fora de `compras_*`.
 - Faturas: o Guará (guara.pt) é a fonte principal; importam-se a pedido ("dá-lhe agora"), com `compras_import_invoice` (a tarefa agendada de domingo está desligada). Receitas: `compras_import_recipes` (sempre `p_completo:false`).
   Atenção: o Guará não traz o peso de artigos vendidos ao kg (ex.: salmão na Makro), por isso esses preços podem vir errados.
+- Stock e vendas: vendas do ZSbms (zsbmsv2.zonesoft.org, separador do navegador integrado com sessão do dono) importadas a pedido com `compras_import_sales` (dia+código, substitui os dias enviados).
+  Leitura: POST para client.zonesoft.org com o mesmo Metadata da página e o cabeçalho `X-Requested-With: XMLHttpRequest`; `Documentos/` (FT, FA, FS, NC por dia, `recordsPerPage` 500) e `Documentos/getInstance/{"loja":1,"doc","serie","numero"}` (traz `linhas`). Anulados fora, NC a subtrair. Só ler, nunca gravar no ZSbms.
+  Artigos → receitas em `compras_zs_items` (receita do Guará ou produto, `fator`, `ignorar` para menus/AYCE cujos componentes vêm em linhas próprias).
+  Stock = última contagem (ou 0 em `stock_inicio`) + `compras_purchase_lines` − consumo (vendas × `compras__recipe_usage`). `products.receita_fator` converte unidades da receita; `recipes.acompanhamento` evita contar o acompanhamento duas vezes.
 - Nunca pôr PINs, chaves ou palavras-passe no repositório.
