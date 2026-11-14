@@ -588,10 +588,14 @@ AS $function$
 declare
   u public.compras_users; sid uuid; inv uuid := gen_random_uuid(); l jsonb; pid uuid; k text;
   up numeric; pq numeric; pp numeric; prev public.compras_offers; n int := 0; newmap jsonb := '{}'; d date; v_nif text;
+  known_pid uuid; known_pq numeric; is_nc boolean; v_total numeric;
 begin
   u := public.compras__chefe(p_token);
   d := coalesce(nullif(p_inv->>'data','')::date, current_date);
   v_nif := regexp_replace(coalesce(p_inv->>'nif',''), '\D', '', 'g');
+  v_total := nullif(p_inv->>'total','')::numeric;
+  -- nota de crédito: total negativo ou número começado por NC
+  is_nc := coalesce(v_total, 0) < 0 or coalesce(p_inv->>'numero','') ~* '^\s*NC';
   sid := nullif(p_inv->>'supplier_id','')::uuid;
   if sid is null and v_nif <> '' then
     select s.id into sid from public.compras_suppliers s where s.nif = v_nif limit 1;
@@ -603,7 +607,7 @@ begin
   end if;
   insert into public.compras_invoices (id, supplier_id, fornecedor_nome, numero, data, total, linhas, created_by)
   values (inv, sid, (select s.nome from public.compras_suppliers s where s.id = sid), coalesce(p_inv->>'numero',''), d,
-          nullif(p_inv->>'total','')::numeric, coalesce(p_inv->'linhas','[]'::jsonb), u.id);
+          v_total, coalesce(p_inv->'linhas','[]'::jsonb), u.id);
   for l in select * from jsonb_array_elements(coalesce(p_inv->'linhas','[]'::jsonb)) loop
     pp := nullif(l->>'price','')::numeric;
     pq := coalesce(nullif(l->>'pack_qty','')::numeric, 1);
@@ -611,12 +615,19 @@ begin
     if pp is null or pp < 0 then continue; end if;
     -- vasilhame / caução não é produto (ex.: "Barril Damm 50L Vas")
     if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o)' or coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)' then continue; end if;
-    up := pp / pq;
     pid := nullif(l->>'product_id','')::uuid;
-    -- primeiro: o mesmo artigo já conhecido neste fornecedor (pela descrição da fatura)
-    if pid is null and coalesce(l->>'desc','') <> '' then
-      select o.product_id into pid from public.compras_offers o where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc') limit 1;
+    -- artigo já conhecido neste fornecedor (pela descrição da fatura): usa sempre o mesmo produto e a mesma embalagem.
+    -- Se o produto vier escolhido à mão (revisão na app), vale o que o chefe escolheu.
+    known_pid := null; known_pq := null;
+    if coalesce(l->>'desc','') <> '' then
+      select o.product_id, o.pack_qty into known_pid, known_pq from public.compras_offers o
+       where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc') limit 1;
     end if;
+    if pid is null and known_pid is not null then
+      pid := known_pid;
+      if known_pq > 0 then pq := known_pq; end if;
+    end if;
+    up := pp / pq;
     if pid is null then
       k := lower(trim(coalesce(l->>'novo_nome','')));
       if k = '' then continue; end if;
@@ -631,6 +642,14 @@ begin
         end if;
         newmap := newmap || jsonb_build_object(k, pid);
       end if;
+    end if;
+    -- nota de crédito: tira stock e não conta como preço de compra
+    if is_nc then
+      if nullif(l->>'qty','') is not null then
+        insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, -abs((l->>'qty')::numeric * pq));
+      end if;
+      n := n + 1;
+      continue;
     end if;
     insert into public.compras_price_history (product_id, supplier_id, data, unit_price, invoice_id) values (pid, sid, d, up, inv);
     if nullif(l->>'qty','') is not null then
@@ -647,7 +666,7 @@ begin
     end if;
     n := n + 1;
   end loop;
-  return jsonb_build_object('invoice_id', inv, 'supplier_id', sid, 'linhas', n);
+  return jsonb_build_object('invoice_id', inv, 'supplier_id', sid, 'linhas', n, 'nota_credito', is_nc);
 end $function$
 ;
 CREATE OR REPLACE FUNCTION public.compras_save_product(p_token text, p_id uuid, p_nome text, p_categoria text, p_unidade text, p_setores text[] DEFAULT NULL::text[])
