@@ -722,7 +722,7 @@ function viewStock(){
   const ab = S.count && S.count.aberta; const ult = S.count && S.count.ultima;
   let h = `<h2 style="margin-bottom:4px">Stock</h2><p class="lead">Faturas que entraram menos o que se gastou nas vendas (receitas do Guará).${st.vendas_ate ? ` Vendas até ${fmtDate(st.vendas_ate)}.` : " Ainda sem vendas importadas."}</p>`;
   if (ab) h += `<div class="banner row" style="justify-content:space-between;margin-bottom:12px"><span>Contagem a decorrer desde ${fmtDate(ab.data)} · ${(ab.linhas || []).length} registos</span><button class="small primary" data-action="count-go">Contar</button></div>`;
-  else if (isChefe()) h += `<div class="row" style="margin-bottom:12px"><button class="primary" data-action="count-start">Começar contagem</button><small class="muted">Uma vez por mês. Todos podem ajudar a contar.</small></div>`;
+  else h += `<div class="row" style="margin-bottom:12px"><button class="primary" data-action="count-start">Começar contagem</button><small class="muted">${isChefe() ? "Uma vez por mês. Todos podem ajudar a contar." : "Qualquer pessoa pode começar e contar. O chefe fecha a contagem no fim."}</small></div>`;
   if (ult && ult.resultado && ult.resultado.length) {
     const diffs = ult.resultado.map(r => ({...r, p:prodById(r.product_id), d:(Number(r.contado)||0) - (Number(r.esperado)||0)})).filter(r => r.p && Math.abs(r.d) > 0.0005).sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
     h += `<div class="card stack" style="margin-bottom:12px"><div class="row" style="justify-content:space-between"><b>Última contagem: ${fmtDate(ult.data)}</b><button class="small" data-action="count-diff">${S.showDiff ? "Esconder" : "Ver diferenças"}</button></div>`
