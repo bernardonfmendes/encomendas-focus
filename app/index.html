@@ -323,7 +323,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", fatTab:null, fatF:"todos", renaming:null, stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, showDiff:false
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", fatTab:null, fatF:"todos", renaming:null, stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, note:"", gq:"", confirmCancelOrd:null, showDiff:false
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -415,7 +415,7 @@ async function loadDrafts(){
   if (!isChefe()) return;
   try { S.drafts = await rpc("compras_drafts_list", {p_token:S.token}) || []; } catch(e){}
   clearTimeout(draftTimer);
-  if (S.drafts.some(d => d.status === "a_ler")) draftTimer = setTimeout(async () => { const before = S.drafts.filter(d => d.status === "pronta").length; await loadDrafts(); if (S.drafts.filter(d => d.status === "pronta").length > before) toast("Fatura lida. Está pronta a rever."); schedule(); }, 5000);
+  if (S.drafts.some(d => d.status === "a_ler")) draftTimer = setTimeout(async () => { const before = S.drafts.filter(d => d.status === "pronta").length; await loadDrafts(); if (S.drafts.filter(d => d.status === "pronta").length > before) toast("Fatura lida. Está pronta a rever."); bg(); }, 5000);
 }
 async function loadCatalog(){
   try { const c = await rpc("compras_catalog", {p_token:S.token}); S.products = c.products || []; S.suppliers = c.suppliers || []; S.me.restaurante = c.restaurante; ls.set("cf_cat", c); }
@@ -439,11 +439,14 @@ async function loadInvoices(){ try { S.invoices = await rpc("compras_invoices_li
 async function loadUsers(){ try { S.users = await rpc("compras_users_list", {p_token:S.token}) || []; } catch(e){} }
 
 // auto refresh: orders every 30 s, catalog every 5 min, when visible
-setInterval(async () => { if (!S.me || document.hidden) return; const before = S.pend; await loadOrders(); if (isChefe() && S.pend > before) toast("Nova encomenda por confirmar."); schedule(); }, 30000);
-setInterval(async () => { if (!S.me || document.hidden) return; await loadCatalog(); schedule(); }, 300000);
-document.addEventListener("visibilitychange", async () => { if (!document.hidden && S.me) { await Promise.all([loadOrders(), loadCatalog(), loadDrafts()]); schedule(); } });
+setInterval(async () => { if (!S.me || document.hidden) return; const before = S.pend; await loadOrders(); if (isChefe() && S.pend > before) toast("Nova encomenda por confirmar."); bg(); }, 30000);
+setInterval(async () => { if (!S.me || document.hidden) return; await loadCatalog(); bg(); }, 300000);
+document.addEventListener("visibilitychange", async () => { if (!document.hidden && S.me) { await Promise.all([loadOrders(), loadCatalog(), loadDrafts()]); bg(); } });
 
 // ---------- render ----------
+// ecrãs com formulários: as atualizações em segundo plano só refrescam o cabeçalho, para não apagar o que se está a escrever
+const formView = () => S.pinForm || !!S.editProd || !!S.review || !!S.rejecting || S.view === "gestao" || (S.view === "stock" && S.counting) || Object.keys(S.edits).length > 0;
+function bg(){ if (formView()) chrome(); else schedule(); }
 let queued = false, deferred = false;
 function schedule(){
   if (queued) return; queued = true;
@@ -458,13 +461,14 @@ function route(){
   const h = (location.hash || "").slice(1);
   const ok = ["encomendar","carrinho","pedidos","stock"].concat(isChefe() ? ["faturas","gestao"] : []);
   S.view = ok.includes(h) ? h : "encomendar";
+  S.pinForm = false; S.supOpen = false;
   if (S.view !== "encomendar") S.editProd = null;
   if (S.view === "gestao") loadUsers().then(schedule);
   if (S.view === "stock") loadStock().then(schedule); else S.counting = false;
   render(); window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", () => { if (S.me) route(); });
-window.addEventListener("online", async () => { if (!S.me) return; await Promise.all([loadCatalog(), loadOrders()]); schedule(); });
+window.addEventListener("online", async () => { if (!S.me) return; await Promise.all([loadCatalog(), loadOrders()]); bg(); });
 window.addEventListener("offline", () => { S.offline = true; if (S.me) schedule(); });
 if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 
@@ -480,7 +484,7 @@ function chrome(){
   al.innerHTML = `<span>${S.pend} ${S.pend === 1 ? "encomenda por confirmar" : "encomendas por confirmar"}</span><span>Ver →</span>`;
   const bb = $("#bellBtn"); bb.setAttribute("aria-pressed", String(S.push === "on")); bb.title = S.push === "on" ? "Notificações ativas (tocar para desativar)" : "Ativar notificações";
   $("#offBanner").hidden = !S.offline;
-  $("#shopbar").hidden = S.view !== "encomendar" || !!S.editProd;
+  $("#shopbar").hidden = S.view !== "encomendar" || !!S.editProd || S.pinForm;
   const ents = cartEntries(); const bar = $("#cartbar");
   $("#sitebar").innerHTML = SETORES.map(([k, n]) => { const c = ents.filter(e => e.setor === k).length;
     return `<button class="chip" data-action="setor" data-s="${k}" aria-pressed="${S.setor === k}">${n}${c ? `<span class="sc">${c}</span>` : ""}</button>`; }).join("");
@@ -552,7 +556,7 @@ function viewShop(){
   if (!S.products.length) return `<div class="card empty"><h3>O catálogo ainda está vazio</h3><p class="lead">${isChefe() ? "Leia a primeira fatura de um fornecedor. A app cria os produtos com os preços." : "O chefe ainda não carregou produtos. Assim que ler as primeiras faturas, aparecem aqui."}</p>${isChefe() ? '<a class="btn primary" href="#faturas">Ler uma fatura</a>' : ""}</div>`;
   const q = norm(S.search); const showAll = S.todos || !!q;
   const bySup = p => !S.sup || p.offers.some(o => o.supplier_id === S.sup);
-  const base = (showAll ? S.products : S.products.filter(inSite)).filter(bySup);
+  const base = (showAll ? S.products : S.products.filter(inSite)).filter(bySup).filter(p => isChefe() || p.offers.length);
   const cats = [...new Set(base.map(p => p.categoria || "Outros"))].sort((a,b) => CATS.indexOf(a) - CATS.indexOf(b));
   if (S.cat && !cats.includes(S.cat)) S.cat = "";
   const more = q ? `<div class="row" style="margin-top:14px"></div>` : S.todos ? `<div class="row" style="margin-top:14px"><button class="small" data-action="todos">Mostrar só ${esc(setorNome(S.setor))}</button></div>`
@@ -623,7 +627,7 @@ function viewCart(){
       + es.map(e => `<li><div><b>${esc(e.p.nome)}${multi ? `<span class="stag">${esc(setorNome(e.setor))}</span>` : ""}</b><small>${esc(unitInfo(e.o.pack_qty, e.p.unidade, e.o.pack_price))}</small></div>${stepper(e.key, e.qty, stepOf(e.o.pack_qty, e.p.unidade), qLabel(e.o.pack_qty, e.p.unidade))}<span class="num">${eur(e.qty * e.o.pack_price)}</span></li>`).join("")
       + `</ul>${cartMin(sid, tot) ? `<footer>${cartMin(sid, tot)}</footer>` : ""}</section>`;
   }
-  return h + `<details class="more2"><summary>+ Nota para o fornecedor</summary><textarea id="cartnote" placeholder="Ex.: entregar antes das 11h" style="margin-top:8px"></textarea></details>
+  return h + `<details class="more2" ${S.note ? "open" : ""}><summary>+ Nota para o fornecedor</summary><textarea id="cartnote" placeholder="Ex.: entregar antes das 11h" style="margin-top:8px">${esc(S.note)}</textarea></details>
     <button class="link" data-action="clear-cart" style="align-self:flex-start">Esvaziar carrinho</button>
     <small class="muted">Valores sem IVA. ${isChefe() ? "As suas encomendas ficam logo aprovadas." : "O chefe confirma antes de enviar."}</small>
     <div class="stickysub"><div><small class="muted">Total</small><b>${eur(grand)}</b></div><button class="primary" data-action="submit-cart">${isChefe() ? "Criar encomendas" : "Enviar ao chefe"}</button></div></div>`;
@@ -684,7 +688,7 @@ function orderCard(o){
       <div class="btnrow"><button class="danger" data-action="reject-confirm" data-o="${o.id}">Rejeitar encomenda</button><button data-action="reject-cancel">Cancelar</button></div></div>`
     : `<button class="primary full" data-action="approve-send" data-o="${o.id}">Confirmar e enviar</button>
     <div class="btnrow"><button class="good" data-action="approve" data-o="${o.id}">Só confirmar</button><button class="danger" data-action="reject" data-o="${o.id}">Rejeitar</button></div>`}`;
-  else if (o.status === "pendente" && o.meu) h += `<div class="row"><button class="small danger" data-action="cancel" data-o="${o.id}">Cancelar pedido</button></div>`;
+  else if (o.status === "pendente" && o.meu) h += `<div class="row"><button class="small danger" data-action="cancel" data-o="${o.id}">${S.confirmCancelOrd === o.id ? "Confirmar: cancelar pedido" : "Cancelar pedido"}</button></div>`;
   if (editing && o.status === "aprovada" && dirty) h += `<p class="banner" style="margin:0">Alterou quantidades. Guarde antes de enviar ao fornecedor (quantidade 0 retira o produto).</p>
     <div class="row"><button class="good" data-action="save-items" data-o="${o.id}">Guardar alterações</button><button data-action="undo-items" data-o="${o.id}">Desfazer</button></div>`;
   if (o.status === "aprovada" && isChefe() && !dirty) {
@@ -710,10 +714,11 @@ function stockInfo(p){
   const cls = st < 0 ? "neg" : (dias !== null && dias < 3 ? "low" : "");
   return {st, cd, dias, cls, x};
 }
+const catOrd = p => { const i = CATS.indexOf(p.categoria || "Outros"); return i < 0 ? 99 : i; };
 function stockHint(p){
   const i = stockInfo(p); if (!i) return "";
   const u = p.unidade || "un"; const need = i.cd * 7 - i.st;
-  return `<div class="stk">Stock <b class="${i.cls}">${esc(qFmt(i.st, u))}</b>${i.cd > 0 ? ` · gasta ~${esc(qFmt(i.cd * 7, u))}/semana${need > 0 ? ` · para 7 dias faltam ~${esc(qFmt(need, u))}` : ""}` : ""}</div>`;
+  return `<div class="stk">Stock <b class="${i.cls}">${i.st <= 0 ? "acabou" : esc(qFmt(i.st, u))}</b>${i.cd > 0 ? ` · gasta ~${esc(qFmt(i.cd * 7, u))}/semana${need > 0 ? ` · para 7 dias faltam ~${esc(qFmt(need, u))}` : ""}` : ""}</div>`;
 }
 function viewStock(){
   const st = S.stock;
@@ -736,7 +741,7 @@ function viewStock(){
   let list = S.products.map(p => ({p, i:stockInfo(p)})).filter(r => r.i && (!q || norm(r.p.nome).includes(q)));
   if (S.stockF === "acabar") list = list.filter(r => r.i.cd > 0 && (r.i.st <= 0 || (r.i.dias !== null && r.i.dias < 4))).sort((a, b) => (a.i.dias ?? 0) - (b.i.dias ?? 0));
   else if (S.stockF === "parados") list = list.filter(r => r.i.cd === 0);
-  else list.sort((a, b) => (a.p.categoria || "").localeCompare(b.p.categoria || "") || a.p.nome.localeCompare(b.p.nome));
+  else list.sort((a, b) => catOrd(a.p) - catOrd(b.p) || a.p.nome.localeCompare(b.p.nome, "pt"));
   if (!list.length) return h + `<p class="muted">${q ? "Nenhum produto encontrado." : "Nada nesta lista."}</p>`;
   let cat = null; h += `<div class="stack" style="gap:0">`; let open = false;
   for (const {p, i} of list) {
@@ -755,7 +760,7 @@ function viewCount(){
     <div class="seg" id="countbar" role="group" aria-label="Sítio" style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:3px;margin-bottom:8px">${SETORES.map(([k, n]) => { const c = (ab.linhas || []).filter(l => l.setor === k).length; return `<button class="chip" style="border:0;border-radius:9px;justify-content:center;${setor === k ? "background:var(--accent);color:var(--on-accent)" : "background:none"}" data-action="setor" data-s="${k}" aria-pressed="${setor === k}">${n}${c ? ` <small>(${c})</small>` : ""}</button>`; }).join("")}</div>
     <div class="srow" style="margin-bottom:8px"><input id="countSearch" type="search" placeholder="Procurar produto" value="${esc(S.countQ)}" autocomplete="off" aria-label="Procurar produto a contar"></div>`;
   const q = norm(S.countQ);
-  const list = S.products.filter(p => inSite(p) && (!q || norm(p.nome).includes(q))).sort((a, b) => (a.categoria || "").localeCompare(b.categoria || "") || a.nome.localeCompare(b.nome));
+  const list = S.products.filter(p => inSite(p) && (!q || norm(p.nome).includes(q))).sort((a, b) => catOrd(a) - catOrd(b) || a.nome.localeCompare(b.nome, "pt"));
   let cat = null, open = false;
   for (const p of list) {
     if (p.categoria !== cat) { if (open) h += `</div>`; cat = p.categoria; h += `<div class="cnthd">${esc(cat || "Outros")}</div><div class="slist">`; open = true; }
@@ -990,8 +995,17 @@ function viewGestao(){
       <label class="f">Encomendas por<select id="nsVia"><option value="numero">Número de WhatsApp</option><option value="grupo">Grupo de WhatsApp</option></select></label></div>
       <div class="row" style="margin-top:10px"><button class="small primary" data-action="sup-add">Adicionar</button></div></div></div>`;
   // products
-  h += `<h2 style="margin-top:20px">Produtos (${S.products.length})</h2><p class="lead">Quando o mesmo produto aparece com dois nomes, use “Juntar com” para ficar um só, com os preços de todos os fornecedores.</p><div class="stack">`;
-  h += S.products.map(p => `<div class="card stack"><div class="prow">
+  h += `<h2 style="margin-top:20px">Produtos (${S.products.length})</h2><p class="lead">Quando o mesmo produto aparece com dois nomes, use “Juntar com” para ficar um só, com os preços de todos os fornecedores.</p>
+    <input id="prodSearch" type="search" placeholder="Procurar produto (ou “sem preço”)" value="${esc(S.gq)}" autocomplete="off" aria-label="Procurar produto" style="margin-bottom:10px"><div class="stack" id="gprods">${gestProds()}</div>`;
+  return h;
+}
+function gestProds(){
+  const q = norm(S.gq);
+  if (!q) { const n = S.products.filter(p => !p.offers.length).length; return `<p class="muted">Escreva parte do nome.${n ? ` Há ${n} ${n === 1 ? "produto" : "produtos"} sem preço: escreva “sem preço” para os ver.` : ""}</p>`; }
+  const all = q === "sem preco" ? S.products.filter(p => !p.offers.length)
+    : S.products.filter(p => q.split(/\s+/).every(w => norm(p.nome + " " + p.offers.map(o => o.alias).join(" ")).includes(w)));
+  if (!all.length) return `<p class="muted">Nenhum produto encontrado.</p>`;
+  return all.slice(0, 25).map(p => `<div class="card stack"><div class="prow">
       <label class="f wide">Nome<input id="pn-${p.id}" value="${esc(p.nome)}"></label>
       <label class="f">Categoria<select id="pc-${p.id}">${CATS.map(c => `<option ${(p.categoria || "Outros") === c ? "selected" : ""}>${c}</option>`).join("")}</select></label>
       <label class="f">Unidade<select id="pu-${p.id}">${UNITS.map(u => `<option ${p.unidade === u ? "selected" : ""}>${u}</option>`).join("")}</select></label></div>
@@ -999,8 +1013,7 @@ function viewGestao(){
       <div class="row"><button class="small" data-action="prod-save" data-p="${p.id}">Guardar</button>
         <select id="pm-${p.id}" style="flex:1;min-width:0" aria-label="Juntar com"><option value="">Juntar com…</option>${S.products.filter(x => x.id !== p.id).map(x => `<option value="${x.id}">${esc(x.nome)}</option>`).join("")}</select>
         <button class="small" data-action="merge" data-p="${p.id}">Juntar</button>
-        <button class="small danger" data-action="del-prod" data-p="${p.id}">${S.confirmDel === p.id ? "Confirmar apagar" : "Apagar"}</button></div></div>`).join("");
-  return h + `</div>`;
+        <button class="small danger" data-action="del-prod" data-p="${p.id}">${S.confirmDel === p.id ? "Confirmar apagar" : "Apagar"}</button></div></div>`).join("") + (all.length > 25 ? `<p class="muted">Mostrar os primeiros 25 de ${all.length}. Escreva mais letras para afinar.</p>` : "");
 }
 
 // ---------- events ----------
@@ -1073,8 +1086,8 @@ document.addEventListener("click", async ev => {
     else if (a === "submit-cart") {
       b.disabled = true;
       const items = cartEntries().map(e => ({product_id:e.pid, supplier_id:e.sid, qty:e.qty, setor:e.setor}));
-      const r = await rpc("compras_submit_order", {p_token:S.token, p_items:items, p_nota:val("cartnote")});
-      S.cart = {}; saveCart(); await loadOrders();
+      const r = await rpc("compras_submit_order", {p_token:S.token, p_items:items, p_nota:S.note});
+      S.cart = {}; S.note = ""; saveCart(); await loadOrders();
       if (!isChefe()) pushNotify("nova");
       toast((r.juntadas ? (r.juntadas === 1 ? "Produtos juntados à encomenda aberta do fornecedor. " : "Produtos juntados às encomendas abertas. ") : "")
         + (r.aprovadas ? "Envie-as em Pedidos." : "O chefe vai confirmar."));
@@ -1147,7 +1160,7 @@ document.addEventListener("click", async ev => {
       if (S.confirmDelOrder !== b.dataset.o) { S.confirmDelOrder = b.dataset.o; render(); return; }
       S.confirmDelOrder = null; b.disabled = true; await rpc("compras_cancel_order", {p_token:S.token, p_id:b.dataset.o}); delete S.edits[b.dataset.o]; await loadOrders(); render(); toast("Encomenda apagada.");
     }
-    else if (a === "cancel") { b.disabled = true; await rpc("compras_cancel_order", {p_token:S.token, p_id:b.dataset.o}); await loadOrders(); render(); toast("Pedido cancelado."); }
+    else if (a === "cancel") { if (S.confirmCancelOrd !== b.dataset.o) { S.confirmCancelOrd = b.dataset.o; render(); return; } S.confirmCancelOrd = null; b.disabled = true; await rpc("compras_cancel_order", {p_token:S.token, p_id:b.dataset.o}); await loadOrders(); render(); toast("Pedido cancelado."); }
     else if (a === "copy") {
       const pre = document.getElementById("msg-" + b.dataset.o);
       try { await navigator.clipboard.writeText(pre.textContent); toast("Mensagem copiada. Cole-a no WhatsApp do fornecedor."); }
@@ -1195,7 +1208,7 @@ document.addEventListener("click", async ev => {
       await loadCatalog(); render(); toast("Produtos juntados.");
     }
     else if (a === "del-prod") { if (S.confirmDel !== b.dataset.p) { S.confirmDel = b.dataset.p; render(); return; } S.confirmDel = null; await rpc("compras_delete_product", {p_token:S.token, p_id:b.dataset.p}); await loadCatalog(); render(); toast("Produto apagado."); }
-    else if (a === "pin-form") { S.pinForm = true; render(); }
+    else if (a === "pin-form") { S.pinForm = true; render(); window.scrollTo(0, 0); }
     else if (a === "pin-cancel") { S.pinForm = false; render(); }
     else if (a === "pin-save") { await rpc("compras_change_pin", {p_token:S.token, p_old:val("pOld"), p_new:val("pNew")}); S.pinForm = false; render(); toast("PIN alterado."); }
     else if (a === "logout") endSession(false);
@@ -1203,6 +1216,8 @@ document.addEventListener("click", async ev => {
 });
 document.addEventListener("input", ev => {
   const t = ev.target;
+  if (t.id === "cartnote") { S.note = t.value; return; }
+  if (t.id === "prodSearch") { S.gq = t.value; const g = document.getElementById("gprods"); if (g) g.innerHTML = gestProds(); return; }
   if (t.id && t.id.startsWith("rej-")) { S.rejText = t.value; return; }
   if (t.id === "search") { S.search = t.value; render(); return; }
   if (t.id === "stockSearch" || t.id === "countSearch") { S[t.id === "stockSearch" ? "stockQ" : "countQ"] = t.value; const pos = t.selectionStart; render(); const n = document.getElementById(t.id); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch(e){} } return; }
