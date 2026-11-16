@@ -1202,12 +1202,11 @@ begin
                 where r.entradas <> 0 or r.saidas <> 0 or r.contado or r.consumo_dia <> 0), '[]'::jsonb));
 end $function$;
 
--- Vendas do ZSbms (substitui os dias enviados)
-create or replace function public.compras_import_sales(p_token text, p_rows jsonb) returns jsonb
+-- Vendas do ZSbms (substitui os dias enviados). O núcleo é comum à app (chefe) e à importação automática.
+create or replace function public.compras__import_sales(p_rows jsonb) returns jsonb
 language plpgsql security definer set search_path to 'public', 'extensions' as $function$
-declare u public.compras_users; n int; nd int;
+declare n int; nd int;
 begin
-  u := public.compras__chefe(p_token);
   delete from public.compras_sales where dia in (select distinct (x->>'dia')::date from jsonb_array_elements(coalesce(p_rows,'[]')) x);
   get diagnostics nd = row_count;
   insert into public.compras_sales (dia, codigo, descricao, qtd, total)
@@ -1222,6 +1221,14 @@ begin
   on conflict (codigo) do update set descricao = excluded.descricao;
   perform public.compras__refresh_media_sushi();
   return jsonb_build_object('linhas', n, 'substituidas', nd);
+end $function$;
+revoke execute on function public.compras__import_sales(jsonb) from public, anon, authenticated;
+
+create or replace function public.compras_import_sales(p_token text, p_rows jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+begin
+  perform public.compras__chefe(p_token);
+  return public.compras__import_sales(p_rows);
 end $function$;
 
 -- Contagens
@@ -1357,3 +1364,42 @@ revoke execute on function public.compras__refresh_media_sushi() from public, an
 
 -- Data da fatura do preço anterior
 alter table public.compras_offers add column if not exists prev_data date;
+
+-- Importação automática das vendas do ZSbms (função compras-zs-vendas, sem PC ligado).
+-- compras_zs_cfg: chave que a tarefa agendada envia à função (só acessível com a chave de serviço) e registo da última execução.
+-- O utilizador do ZSbms fica nos segredos da função (ZS_NIF, ZS_USER, ZS_PASS), nunca aqui.
+create table if not exists public.compras_zs_cfg (
+  id boolean primary key default true check (id),
+  chave text not null default replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''),
+  ultima_em timestamptz,
+  ultimo jsonb
+);
+alter table public.compras_zs_cfg enable row level security;
+revoke all on public.compras_zs_cfg from anon, authenticated;
+insert into public.compras_zs_cfg default values on conflict (id) do nothing;
+
+-- Chamada pela função (chave de serviço): grava as vendas e regista o resultado. Com p_rows a null só regista (ex.: um erro).
+create or replace function public.compras_zs_auto_import(p_rows jsonb, p_info jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare r jsonb := null;
+begin
+  if p_rows is not null then r := public.compras__import_sales(p_rows); end if;
+  update public.compras_zs_cfg set ultima_em = now(), ultimo = coalesce(p_info, '{}'::jsonb) || coalesce(r, '{}'::jsonb) where id;
+  return r;
+end $function$;
+revoke execute on function public.compras_zs_auto_import(jsonb, jsonb) from public, anon, authenticated;
+grant execute on function public.compras_zs_auto_import(jsonb, jsonb) to service_role;
+
+-- Agendamento (pg_cron corre em UTC): 10:10 e 11:10 UTC = 10:10 e 11:10 em Lisboa no inverno, uma hora mais tarde no verão.
+-- A segunda chamada é uma rede de segurança; a importação substitui os dias, por isso repetir não duplica nada.
+create extension if not exists pg_cron with schema pg_catalog;
+create or replace function public.compras__zs_disparar() returns bigint
+language sql security definer set search_path to 'public', 'extensions' as $$
+  select net.http_post(
+    url := 'https://cckgrpmspyurgmbgtjdu.supabase.co/functions/v1/compras-zs-vendas',
+    body := '{}'::jsonb,
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-zs-key', (select chave from public.compras_zs_cfg)),
+    timeout_milliseconds := 150000);
+$$;
+revoke execute on function public.compras__zs_disparar() from public, anon, authenticated;
+select cron.schedule('compras-zs-vendas', '10 10,11 * * *', 'select public.compras__zs_disparar()');
