@@ -2,7 +2,8 @@
 // Entra com o utilizador guardado nos segredos ZS_NIF / ZS_USER / ZS_PASS (nunca no repositório) e só lê:
 // lista os documentos de venda de cada dia (FT, FA, FS e NC), abre cada um para ter as linhas, soma por dia e artigo
 // (anulados fora, NC a subtrair) e grava com compras_zs_auto_import, que substitui os dias enviados.
-// Os cabeçalhos de menu entram com quantidade 0 e as linhas de composição interna do ZSbms (tipo 3) ficam de fora.
+// As linhas de composição interna do ZSbms (tipo 3) ficam de fora. Os cabeçalhos de menu entram com a quantidade
+// vendida: é em compras_zs_items que se diz se o menu se ignora (componentes em linhas próprias) ou tem receita.
 // Só aceita pedidos com o cabeçalho x-zs-key igual à chave guardada em compras_zs_cfg (usada pela tarefa agendada).
 // Corpo (opcional): { "dias": ["2026-11-15"], "ensaio": true }. Sem "dias" lê desde o último dia com vendas
 // (no máximo 6 dias para trás) até hoje. Com "ensaio" devolve as linhas e não grava nada.
@@ -175,8 +176,7 @@ Deno.serve(async (req: Request) => {
             if (tipo === 3) continue;  // composição interna do ZSbms (ficha técnica do artigo vendido): não é uma venda
             const k = dia + "|" + codigo;
             const a = soma.get(k) || { dia, codigo, descricao: "", qtd: 0, total: 0 };
-            // cabeçalho de menu (composto 2): fica o valor, mas a quantidade vem nas linhas dos componentes
-            a.qtd += composto === "2" ? 0 : sinal * (Number(l.qtd) || 0);
+            a.qtd += sinal * (Number(l.qtd) || 0);
             a.total += sinal * (Number(l.total) || 0);
             if (l.descricao) a.descricao = String(l.descricao);
             soma.set(k, a);
