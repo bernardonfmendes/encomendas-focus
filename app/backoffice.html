@@ -98,6 +98,14 @@ aside.drawer section{padding:14px 18px 0}
 aside.drawer h3{margin:6px 0 8px;font-size:16px}
 .chart{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:10px}
 .chart svg{width:100%;height:auto;display:block}
+.gwrap{position:relative}
+.gwrap svg{cursor:crosshair;touch-action:pan-y}
+.gwrap svg:focus:not(:focus-visible){outline:none}
+.gwrap svg:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.gtip{position:absolute;transform:translate(-50%,calc(-100% - 12px));background:var(--ink);color:var(--surface);border-radius:8px;padding:6px 10px;font-size:13px;line-height:1.35;white-space:nowrap;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.2);z-index:3}
+.gtip.baixo{transform:translate(-50%,12px)}
+.gtip b{font-size:15px}
+.gtip small{opacity:.8}
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12.5px;color:var(--muted);margin-top:6px}
 .legend i{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
 .fdrop{position:relative}
@@ -556,7 +564,9 @@ function pratosHtml(pratos, u, dP, temAnt){
         <td class="num">${x.pvp ? eur(x.pvp) : "—"}</td><td class="num">${cp != null ? num(cp, 1) + "%" : "—"}</td><td class="num">${num(x.vendidos_30d, 1)}</td></tr>`; }).join("")}
     </tbody></table></div>`;
 }
+let G = null;
 function grafico(h, u){
+  G = null;
   if (!h.length) return `<p class="muted" style="margin:6px">Sem compras registadas.</p>`;
   const W = 760, H = 240, L = 62, R = 14, T = 14, Bm = 30;
   const t = s => new Date(s + "T12:00:00").getTime();
@@ -566,20 +576,68 @@ function grafico(h, u){
   const X = v => L + (v - x0) / (x1 - x0) * (W - L - R), Y = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - Bm);
   const cores = ["var(--accent)", "var(--nori)", "var(--warn)", "var(--good)", "var(--bad)", "var(--muted)"];
   const porF = new Map(); h.forEach(x => { if (!porF.has(x.supplier_id)) porF.set(x.supplier_id, {nome:x.fornecedor, pts:[]}); porF.get(x.supplier_id).pts.push(x); });
-  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Evolução do preço por ${esc(u)}">`;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" tabindex="0" role="img" aria-label="Evolução do preço por ${esc(u)}. Toque num ponto para ver a data e o preço; com o teclado, use as setas.">`;
   for (let i = 0; i <= 3; i++) { const v = y0 + (y1 - y0) * i / 3, y = Y(v);
     svg += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${L - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${esc(eurU(v))}</text>`; }
   svg += `<text x="${L}" y="${H - 8}" font-size="11" fill="var(--muted)">${fmtDate(new Date(x0).toISOString().slice(0, 10))}</text><text x="${W - R}" y="${H - 8}" text-anchor="end" font-size="11" fill="var(--muted)">${fmtDate(new Date(x1).toISOString().slice(0, 10))}</text>`;
+  svg += `<line class="gl" x1="0" x2="0" y1="${T}" y2="${H - Bm}" stroke="var(--muted)" stroke-dasharray="4 4" visibility="hidden"/>`;
+  const pts = [];
   let k = 0;
   for (const [, f] of porF) {
     const c = cores[k++ % cores.length];
     if (f.pts.length > 1) svg += `<polyline fill="none" stroke="${c}" stroke-width="2" points="${f.pts.map(x => X(t(x.data)).toFixed(1) + "," + Y(Number(x.preco)).toFixed(1)).join(" ")}"/>`;
-    svg += f.pts.map(x => `<circle cx="${X(t(x.data)).toFixed(1)}" cy="${Y(Number(x.preco)).toFixed(1)}" r="4" fill="${x.estimado ? "var(--surface)" : c}" stroke="${c}" stroke-width="2"><title>${esc(fmtDate(x.data) + " · " + f.nome + " · " + eurU(x.preco) + "/" + u + (x.estimado ? " (estimado)" : ""))}</title></circle>`).join("");
+    svg += f.pts.map(x => `<circle cx="${X(t(x.data)).toFixed(1)}" cy="${Y(Number(x.preco)).toFixed(1)}" r="4" fill="${x.estimado ? "var(--surface)" : c}" stroke="${c}" stroke-width="2"/>`).join("");
+    f.pts.forEach(x => pts.push({x:X(t(x.data)), y:Y(Number(x.preco)), data:x.data, preco:x.preco, forn:f.nome, numero:x.numero, est:!!x.estimado, cor:c}));
     f.cor = c;
   }
-  svg += `</svg>`;
-  return svg + `<div class="legend">${[...porF.values()].map(f => `<span><i style="background:${f.cor}"></i>${esc(f.nome)}</span>`).join("")}<span>○ preço estimado</span></div>`;
+  svg += `<circle class="gc" r="8" fill="none" stroke-width="2.5" visibility="hidden"/></svg>`;
+  pts.sort((a, b) => a.x - b.x || a.y - b.y);
+  G = {pts, u, W, H, sel:-1};
+  return `<div class="gwrap">${svg}<div class="gtip" role="status" hidden></div></div><div class="legend">${[...porF.values()].map(f => `<span><i style="background:${f.cor}"></i>${esc(f.nome)}</span>`).join("")}<span>○ preço estimado</span></div>`;
 }
+// Etiqueta do gráfico: tocar (ou passar o rato) mostra a data e o preço do ponto mais perto.
+function pontoPerto(svg, cx, cy){
+  const r = svg.getBoundingClientRect(); if (!r.width) return -1;
+  const vx = (cx - r.left) / r.width * G.W, vy = (cy - r.top) / r.height * G.H;
+  let best = -1, bd = Infinity;
+  G.pts.forEach((p, i) => { const d = Math.abs(p.x - vx) * 3 + Math.abs(p.y - vy); if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+function mostrarPonto(svg, i){
+  const wrap = svg.closest(".gwrap"), tip = $(".gtip", wrap), p = G && G.pts[i];
+  if (!p) return esconderPonto(wrap);
+  G.sel = i;
+  const gl = $(".gl", svg), gc = $(".gc", svg);
+  gl.setAttribute("x1", p.x); gl.setAttribute("x2", p.x); gl.setAttribute("visibility", "visible");
+  gc.setAttribute("cx", p.x); gc.setAttribute("cy", p.y); gc.setAttribute("stroke", p.cor); gc.setAttribute("visibility", "visible");
+  tip.innerHTML = `<small>${esc(fmtDate(p.data))} · ${esc(p.forn)}</small><br><b>${esc(eurU(p.preco))}/${esc(G.u)}</b>${p.est ? ` <small>(estimado)</small>` : ""}`;
+  tip.hidden = false;
+  const r = svg.getBoundingClientRect(), w = wrap.getBoundingClientRect();
+  const px = r.left - w.left + p.x / G.W * r.width, py = r.top - w.top + p.y / G.H * r.height;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(Math.max(px, tw / 2 + 2), w.width - tw / 2 - 2) + "px";
+  tip.style.top = py + "px";
+  tip.classList.toggle("baixo", py - th - 12 < 0);
+}
+function esconderPonto(wrap){
+  const tip = $(".gtip", wrap); if (tip) tip.hidden = true;
+  wrap.querySelectorAll(".gl,.gc").forEach(el => el.setAttribute("visibility", "hidden"));
+  if (G) G.sel = -1;
+}
+document.addEventListener("pointerdown", e => {
+  const svg = e.target.closest && e.target.closest(".gwrap svg");
+  document.querySelectorAll(".gwrap").forEach(w => { if (!w.contains(e.target)) esconderPonto(w); });
+  if (svg && G) mostrarPonto(svg, pontoPerto(svg, e.clientX, e.clientY));
+});
+document.addEventListener("pointermove", e => {
+  if (e.pointerType !== "mouse" && !e.buttons) return;
+  const svg = e.target.closest && e.target.closest(".gwrap svg");
+  if (svg && G) mostrarPonto(svg, pontoPerto(svg, e.clientX, e.clientY));
+});
+document.addEventListener("keydown", e => {
+  const svg = e.target.closest && e.target.closest(".gwrap svg"); if (!svg || !G || !G.pts.length) return;
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const n = G.pts.length, i = G.sel < 0 ? (e.key === "ArrowRight" ? 0 : n - 1) : Math.min(n - 1, Math.max(0, G.sel + (e.key === "ArrowRight" ? 1 : -1))); mostrarPonto(svg, i); }
+});
 function fecharDetalhe(){
   $("#drawer").hidden = true; $("#scrim").hidden = true; document.body.style.overflow = "";
   if (detalheDe && detalheDe.focus) { try { detalheDe.focus(); } catch(e){} } detalheDe = null;
