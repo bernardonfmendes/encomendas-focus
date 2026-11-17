@@ -179,7 +179,7 @@ async function rpc(fn, args){
 const B = {
   token:null, daApp:false, me:null, tab:"produtos",
   prods:[], q:"", fForn:"", fCat:"", fEnc:"",
-  ev:[], per:"30", de:"", ate:"", eForn:"", eCat:"", eTipo:"", eMin:0, eEst:true, sort:{k:"data", dir:-1}, carregado:""
+  ev:[], res:[], vista:"resumo", per:"30", de:"", ate:"", eForn:"", eCat:"", eTipo:"", eMin:0, eEst:true, sort:{k:"data", dir:-1}, sortR:{k:"mes", dir:-1}, carregado:""
 };
 
 // ---------- sessão ----------
@@ -303,6 +303,7 @@ document.addEventListener("change", e => {
   else if (t.id === "de" || t.id === "ate") { B[t.id] = t.value; if (B.de && B.ate && B.de <= B.ate) carregarPrecos(); }
   else if (["eForn", "eCat", "eTipo", "eMin"].includes(t.id)) { B[t.id] = t.id === "eMin" ? Number(t.value) : t.value; linhasPrecos(); }
   else if (t.id === "eEst") { B.eEst = t.checked; linhasPrecos(); }
+  else if (t.id === "vista") { B.vista = t.value; desenharPrecos(); }
 });
 document.addEventListener("keydown", e => {
   const t = e.target;
@@ -348,16 +349,22 @@ async function carregarPrecos(){
   if (!B.de) { B.de = de; B.ate = ate; }
   if (B.per !== "pers") { B.de = de; B.ate = ate; }
   desenharPrecos(true);
-  try { B.ev = await rpc("compras_bo_precos", {p_token:B.token, p_de:B.de, p_ate:B.ate}) || []; B.carregado = B.de + "|" + B.ate; }
+  try {
+    const [ev, res] = await Promise.all([rpc("compras_bo_precos", {p_token:B.token, p_de:B.de, p_ate:B.ate}), rpc("compras_bo_precos_resumo", {p_token:B.token, p_de:B.de, p_ate:B.ate})]);
+    B.ev = ev || []; B.res = res || []; B.carregado = B.de + "|" + B.ate;
+  }
   catch(e){ if (B.token) $("#ebody").innerHTML = `<tr><td colspan="11">${esc(errMsg(e))}</td></tr>`; return; }
   if (B.tab === "precos") desenharPrecos();
 }
 function desenharPrecos(aCarregar){
-  const forn = [...new Map(B.ev.map(e => [e.supplier_id, e.fornecedor]))].sort((a, b) => a[1].localeCompare(b[1], "pt"));
-  const cats = [...new Set(B.ev.map(e => e.categoria || "Outros"))].sort((a, b) => CATS.indexOf(a) - CATS.indexOf(b));
+  const todos = B.ev.concat(B.res);
+  const forn = [...new Map(todos.map(e => [e.supplier_id, e.fornecedor]))].sort((a, b) => a[1].localeCompare(b[1], "pt"));
+  const cats = [...new Set(todos.map(e => e.categoria || "Outros"))].sort((a, b) => CATS.indexOf(a) - CATS.indexOf(b));
+  const R = B.vista === "resumo";
   const opt = (v, t, cur) => `<option value="${v}" ${String(cur) === String(v) ? "selected" : ""}>${t}</option>`;
-  $("#main").innerHTML = `<p class="lead">Mudanças de preço por unidade (€/kg, €/L, €/un) em cada fornecedor, com a data da fatura. <b>Impacto por mês</b> = diferença de preço × o que compra por mês (média dos últimos 3 meses). Clique numa linha para ver o histórico e os pratos afetados.</p>
+  $("#main").innerHTML = `<p class="lead">${R ? "Uma linha por produto e fornecedor: preço no início e no fim do período e quantas vezes mudou pelo meio. <b>No período</b> = quanto pagou a mais (ou a menos) nas compras do período face ao preço do início." : "Cada mudança de preço, fatura a fatura."} Preços por unidade (€/kg, €/L, €/un). <b>Impacto por mês</b> = diferença de preço × o que compra por mês (média dos últimos 3 meses). Clique numa linha para ver o histórico e os pratos afetados.</p>
     <div class="toolbar">
+      <label class="f">Ver<select id="vista">${opt("resumo", "Um produto por linha", B.vista)}${opt("todas", "Todas as mudanças", B.vista)}</select></label>
       <label class="f">Período<select id="per">${opt("7", "Últimos 7 dias", B.per)}${opt("30", "Últimos 30 dias", B.per)}${opt("90", "Últimos 90 dias", B.per)}${opt("mes", "Este mês", B.per)}${opt("mesant", "Mês passado", B.per)}${opt("pers", "Escolher datas", B.per)}</select></label>
       ${B.per === "pers" ? `<label class="f">De<input type="date" id="de" value="${esc(B.de)}"></label><label class="f">Até<input type="date" id="ate" value="${esc(B.ate)}"></label>` : ""}
       <label class="f">Fornecedor<select id="eForn"><option value="">Todos</option>${forn.map(([id, n]) => opt(id, esc(n), B.eForn)).join("")}</select></label>
@@ -368,13 +375,14 @@ function desenharPrecos(aCarregar){
       <button data-action="exportar">Exportar para Excel</button>
     </div>
     <div class="cards" id="kpis"></div>
-    <div class="tbl"><table><thead><tr>
-      <th>${sortBtn("data", "Data")}</th><th>Produto</th><th>Fornecedor</th><th class="num">Antes</th><th class="num">Agora</th>
-      <th class="num">${sortBtn("var", "Variação")}</th><th class="num">${sortBtn("compra", "Nesta compra")}</th><th class="num">${sortBtn("mes", "Impacto/mês")}</th><th class="num">Pratos</th><th>Fatura</th>
+    <div class="tbl"><table><thead><tr>${R
+      ? `<th>Produto</th><th>Fornecedor</th><th class="num">Início</th><th class="num">Fim</th><th class="num">${sortBtn("var", "Variação")}</th><th class="num">${sortBtn("mud", "Mudanças")}</th><th class="num">${sortBtn("per", "No período")}</th><th class="num">${sortBtn("mes", "Impacto/mês")}</th><th class="num">Pratos</th>`
+      : `<th>${sortBtn("data", "Data")}</th><th>Produto</th><th>Fornecedor</th><th class="num">Antes</th><th class="num">Agora</th>
+      <th class="num">${sortBtn("var", "Variação")}</th><th class="num">${sortBtn("compra", "Nesta compra")}</th><th class="num">${sortBtn("mes", "Impacto/mês")}</th><th class="num">Pratos</th><th>Fatura</th>`}
     </tr></thead><tbody id="ebody">${aCarregar ? `<tr><td colspan="10" class="muted">A carregar…</td></tr>` : ""}</tbody></table></div>`;
   if (!aCarregar) linhasPrecos();
 }
-function sortBtn(k, t){ const a = B.sort.k === k ? (B.sort.dir < 0 ? " ↓" : " ↑") : ""; return `<button class="sort" data-action="ordenar" data-k="${k}">${t}${a}</button>`; }
+function sortBtn(k, t){ const so = B.vista === "resumo" ? B.sortR : B.sort; const a = so.k === k ? (so.dir < 0 ? " ↓" : " ↑") : ""; return `<button class="sort" data-action="ordenar" data-k="${k}">${t}${a}</button>`; }
 const delta = e => Number(e.preco) - Number(e.preco_anterior);
 const impCompra = e => delta(e) * (Number(e.qtd_fatura) || 0);
 const impMes = e => delta(e) * (Number(e.qtd_mes) || 0);
@@ -385,7 +393,36 @@ function eventosFiltrados(){
   const f = {data:e => e.data, var:e => Math.abs(e.var_pct), compra:e => Math.abs(impCompra(e)), mes:e => Math.abs(impMes(e))}[B.sort.k];
   return l.sort((a, b) => { const x = f(a), y = f(b); return (x < y ? -1 : x > y ? 1 : 0) * B.sort.dir || Math.abs(b.var_pct) - Math.abs(a.var_pct); });
 }
+const impMesR = r => (Number(r.preco_fim) - Number(r.preco_inicio)) * (Number(r.qtd_mes) || 0);
+function resumoFiltrado(){
+  const l = B.res.filter(e => (!B.eForn || e.supplier_id === B.eForn) && (!B.eCat || (e.categoria || "Outros") === B.eCat)
+    && (!B.eTipo || (B.eTipo === "sub" ? e.var_pct > 0 : e.var_pct < 0)) && Math.abs(e.var_pct) >= B.eMin && (B.eEst || !e.estimado));
+  const f = {var:e => Math.abs(e.var_pct), mud:e => e.mudancas, per:e => Math.abs(e.impacto_periodo), mes:e => Math.abs(impMesR(e))}[B.sortR.k];
+  return l.sort((a, b) => { const x = f(a), y = f(b); return (x < y ? -1 : x > y ? 1 : 0) * B.sortR.dir || Math.abs(b.var_pct) - Math.abs(a.var_pct); });
+}
+function linhasResumo(){
+  const l = resumoFiltrado(), soma = (a, f) => a.reduce((s, e) => s + f(e), 0);
+  const sub = l.filter(e => e.var_pct > 0), des = l.filter(e => e.var_pct < 0), tot = soma(l, impMesR), per = soma(l, e => Number(e.impacto_periodo) || 0);
+  $("#kpis").innerHTML = `<div class="kpi"><small>Subiram</small><b class="up">${sub.length}</b><small>${eur(soma(sub, impMesR))}/mês a mais</small></div>
+    <div class="kpi"><small>Desceram</small><b class="down">${des.length}</b><small>${eur(-soma(des, impMesR))}/mês a menos</small></div>
+    <div class="kpi"><small>Efeito no mês</small><b class="${tot > 0 ? "up" : "down"}">${tot > 0 ? "+" : ""}${eur(tot)}</b><small>preço do fim − preço do início</small></div>
+    <div class="kpi"><small>No período (${fmtDate(B.de)} – ${fmtDate(B.ate)})</small><b class="${per > 0 ? "up" : "down"}">${per > 0 ? "+" : ""}${eur(per)}</b><small>pago a mais/menos que no início</small></div>`;
+  $("#ebody").innerHTML = l.map(e => {
+    const c = e.var_pct > 0 ? "up" : e.var_pct < 0 ? "down" : "", im = impMesR(e), ip = Number(e.impacto_periodo) || 0;
+    return `<tr class="click" data-action="detalhe" data-p="${e.product_id}" tabindex="0">
+      <td><b>${esc(e.produto)}</b>${e.estimado ? ` <span class="tag est" title="Há preços calculados pela app neste período: o Guará não mostrou o preço pago">≈ estimado</span>` : ""}<br><small class="muted">${esc(e.categoria || "")}</small></td>
+      <td>${esc(e.fornecedor)}</td>
+      <td class="num">${eurU(e.preco_inicio)}/${esc(e.unidade)}<br><small class="muted">${fmtDate(e.data_inicio)}</small></td>
+      <td class="num">${eurU(e.preco_fim)}/${esc(e.unidade)}<br><small class="muted">${fmtDate(e.data_fim)}</small></td>
+      <td class="num ${c}">${e.var_pct > 0 ? "▲ " : e.var_pct < 0 ? "▼ " : "= "}${pct(e.var_pct)}</td>
+      <td class="num">${e.mudancas}×<br><small class="muted">${eurU(e.preco_min)} – ${eurU(e.preco_max)}</small></td>
+      <td class="num">${ip ? `<span class="${ip > 0 ? "up" : "down"}">${ip > 0 ? "+" : ""}${eur(ip)}</span>` : "—"}<br><small class="muted">${num(e.qtd_periodo, 2)} ${esc(e.unidade)} em ${e.compras} ${e.compras === 1 ? "compra" : "compras"}</small></td>
+      <td class="num">${im ? `<span class="${im > 0 ? "up" : "down"}">${im > 0 ? "+" : ""}${eur(im)}</span><br><small class="muted">${num(e.qtd_mes, 2)} ${esc(e.unidade)}/mês</small>` : "—"}</td>
+      <td class="num">${e.pratos || "—"}</td></tr>`;
+  }).join("") || `<tr><td colspan="9" class="muted">Sem mudanças de preço com estes filtros.</td></tr>`;
+}
 function linhasPrecos(){
+  if (B.vista === "resumo") return linhasResumo();
   const l = eventosFiltrados();
   const sub = l.filter(e => e.var_pct > 0), des = l.filter(e => e.var_pct < 0);
   const soma = (a, f) => a.reduce((s, e) => s + f(e), 0);
@@ -409,17 +446,29 @@ function linhasPrecos(){
   }).join("") || `<tr><td colspan="10" class="muted">Sem mudanças de preço com estes filtros.</td></tr>`;
 }
 function exportar(){
+  const dec0 = n => (Number(n) || 0).toLocaleString("pt-PT", {useGrouping:false, maximumFractionDigits:4});
+  if (B.vista === "resumo") {
+    const l = resumoFiltrado();
+    baixarCsv([["Produto", "Categoria", "Fornecedor", "Data início", "Preço início", "Data fim", "Preço fim", "Unidade", "Variação %", "Mudanças", "Preço mínimo", "Preço máximo", "Compras no período", "Quantidade no período", "Pago a mais/menos no período (€)", "Compra por mês", "Impacto por mês (€)", "Preço estimado", "Pratos que usam"]]
+      .concat(l.map(e => [e.produto, e.categoria, e.fornecedor, fmtDate(e.data_inicio), dec0(e.preco_inicio), fmtDate(e.data_fim), dec0(e.preco_fim), e.unidade, dec0(e.var_pct), e.mudancas,
+        dec0(e.preco_min), dec0(e.preco_max), e.compras, dec0(e.qtd_periodo), dec0(e.impacto_periodo), dec0(e.qtd_mes), dec0(impMesR(e)), e.estimado ? "sim" : "", e.pratos || 0])), "precos_resumo_");
+    return;
+  }
   const l = eventosFiltrados(), dec = n => (Number(n) || 0).toLocaleString("pt-PT", {useGrouping:false, maximumFractionDigits:4});
   const cel = v => { const s = String(v ?? ""); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
   const linhas = [["Data", "Produto", "Categoria", "Fornecedor", "Fatura", "Data anterior", "Preço anterior", "Preço novo", "Unidade", "Variação %", "Quantidade na fatura", "Impacto nesta compra (€)", "Compra por mês", "Impacto por mês (€)", "Preço estimado", "Pratos que usam"]]
     .concat(l.map(e => [fmtDate(e.data), e.produto, e.categoria, e.fornecedor, e.numero, fmtDate(e.data_anterior), dec(e.preco_anterior), dec(e.preco), e.unidade, dec(e.var_pct),
       dec(e.qtd_fatura), dec(impCompra(e)), dec(e.qtd_mes), dec(impMes(e)), (e.estimado || e.estimado_anterior) ? "sim" : "", e.pratos || 0]));
-  const csv = "﻿" + linhas.map(r => r.map(cel).join(";")).join("\r\n");
+  baixarCsv(linhas, "precos_");
+}
+function baixarCsv(linhas, pref){
+  const cel = v => { const s = String(v ?? ""); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const csv = "\ufeff" + linhas.map(r => r.map(cel).join(";")).join("\r\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], {type:"text/csv;charset=utf-8"}));
-  a.download = "precos_" + B.de + "_a_" + B.ate + ".csv"; document.body.appendChild(a); a.click(); a.remove();
+  a.download = pref + B.de + "_a_" + B.ate + ".csv"; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-  toast(l.length + " linhas exportadas.");
+  toast((linhas.length - 1) + " linhas exportadas.");
 }
 
 // ---------- detalhe de um produto ----------
@@ -498,7 +547,7 @@ document.addEventListener("click", e => {
   else if (a === "detalhe") abrirDetalhe(el.dataset.p);
   else if (a === "fechar") fecharDetalhe();
   else if (a === "exportar") exportar();
-  else if (a === "ordenar") { const k = el.dataset.k; B.sort = {k, dir:B.sort.k === k ? -B.sort.dir : -1}; desenharPrecos(); }
+  else if (a === "ordenar") { const k = el.dataset.k, so = B.vista === "resumo" ? "sortR" : "sort"; B[so] = {k, dir:B[so].k === k ? -B[so].dir : -1}; desenharPrecos(); }
 });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches && e.target.matches("tr.click")) abrirDetalhe(e.target.dataset.p); });
 

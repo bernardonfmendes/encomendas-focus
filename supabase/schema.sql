@@ -2472,3 +2472,106 @@ begin
   into r;
   return r;
 end $$;
+
+-- Juntar produtos (também usado pelo "Juntar com" da app): leva as descrições das faturas (ofertas e
+-- compras_offer_aliases), o nome na encomenda, o nome antigo como sinónimo nas receitas e as encomendas.
+-- 17/11: "Picado hambúrguer" (PICADO E HAMBUR) junto em "Carne picada para hambúrguer" (PICADO E HAMBURGUER).
+create or replace function public.compras__merge_products(p_from uuid, p_into uuid) returns void
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare o public.compras_offers; cur public.compras_offers; fs text[]; antigo text;
+begin
+  if p_from = p_into then return; end if;
+  select setores, nome into fs, antigo from public.compras_products where id = p_from;
+  if not found then raise exception 'produto_nao_existe'; end if;
+  update public.compras_products set setores = case when cardinality(setores) = 0 or cardinality(coalesce(fs,'{}')) = 0 then '{}' else public.compras__setores(setores || fs) end where id = p_into;
+  update public.compras_offer_aliases set product_id = p_into where product_id = p_from;
+  for o in select * from public.compras_offers where product_id = p_from loop
+    if coalesce(o.alias,'') <> '' then
+      insert into public.compras_offer_aliases (supplier_id, alias, product_id, pack_qty, origem)
+      values (o.supplier_id, lower(o.alias), p_into, o.pack_qty, 'juntar')
+      on conflict (supplier_id, alias) do update set product_id = excluded.product_id, pack_qty = excluded.pack_qty, atualizado_em = now();
+    end if;
+    select * into cur from public.compras_offers where product_id = p_into and supplier_id = o.supplier_id;
+    if not found then
+      insert into public.compras_offers (product_id, supplier_id, alias, codigo, pack_qty, pack_price, unit_price, prev_unit_price, data, invoice_id, nome_encomenda)
+      values (p_into, o.supplier_id, o.alias, o.codigo, o.pack_qty, o.pack_price, o.unit_price, o.prev_unit_price, o.data, o.invoice_id, o.nome_encomenda);
+    else
+      if coalesce(o.data, '1900-01-01'::date) > coalesce(cur.data, '1900-01-01'::date) then
+        update public.compras_offers set alias = o.alias, codigo = o.codigo, pack_qty = o.pack_qty, pack_price = o.pack_price, unit_price = o.unit_price,
+          prev_unit_price = cur.unit_price, data = o.data, invoice_id = o.invoice_id where product_id = p_into and supplier_id = o.supplier_id;
+      end if;
+      if coalesce(cur.nome_encomenda, '') = '' and coalesce(o.nome_encomenda, '') <> '' then
+        update public.compras_offers set nome_encomenda = o.nome_encomenda where product_id = p_into and supplier_id = o.supplier_id;
+      end if;
+    end if;
+  end loop;
+  update public.compras_price_history set product_id = p_into where product_id = p_from;
+  update public.compras_purchase_lines set product_id = p_into where product_id = p_from;
+  update public.compras_recipe_items set product_id = p_into where product_id = p_from;
+  update public.compras_recipe_aliases set product_id = p_into where product_id = p_from;
+  if public.compras__norm(antigo) <> '' then
+    insert into public.compras_recipe_aliases (ingrediente, product_id) values (public.compras__norm(antigo), p_into) on conflict (ingrediente) do nothing;
+  end if;
+  update public.compras_zs_items set product_id = p_into where product_id = p_from;
+  insert into public.compras_stock_count_lines (count_id, product_id, setor, qty, updated_by, updated_at)
+    select count_id, p_into, setor, qty, updated_by, updated_at from public.compras_stock_count_lines where product_id = p_from
+    on conflict (count_id, product_id, setor) do update set qty = public.compras_stock_count_lines.qty + excluded.qty;
+  update public.compras_orders set items = replace(items::text, p_from::text, p_into::text)::jsonb where items::text like '%' || p_from::text || '%';
+  delete from public.compras_products where id = p_from;
+end $function$;
+revoke execute on function public.compras__merge_products(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.compras_merge_products(p_token text, p_from uuid, p_into uuid) returns void
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  perform public.compras__merge_products(p_from, p_into);
+end $function$;
+
+-- Relatório de preços resumido (back office): uma linha por produto e fornecedor com mudanças no período —
+-- preço no início (o que estava em vigor antes do período) e no fim, quantas vezes mudou, mínimo e máximo,
+-- quanto se pagou a mais/menos nas compras do período face ao preço do início, e impacto por mês.
+create or replace function public.compras_bo_precos_resumo(p_token text, p_de date, p_ate date) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+begin
+  perform public.compras__dono(p_token);
+  return coalesce((
+    with est as (select * from public.compras__precos_estimados()),
+    ph as (select h.product_id, h.supplier_id, h.invoice_id, h.data, avg(h.unit_price) u, min(h.id) id
+             from public.compras_price_history h group by 1, 2, 3, 4),
+    seq as (select ph.*, lag(u) over w pu from ph window w as (partition by product_id, supplier_id order by data, id)),
+    mud as (select product_id, supplier_id, count(*) n from seq where pu > 0 and abs(u / pu - 1) >= 0.005 and data between p_de and p_ate group by 1, 2),
+    antes as (select distinct on (ph.product_id, ph.supplier_id) ph.product_id, ph.supplier_id, ph.u, ph.data, ph.invoice_id
+                from ph join mud using (product_id, supplier_id) where ph.data < p_de order by ph.product_id, ph.supplier_id, ph.data desc, ph.id desc),
+    primeiro as (select distinct on (ph.product_id, ph.supplier_id) ph.product_id, ph.supplier_id, ph.u, ph.data, ph.invoice_id
+                from ph join mud using (product_id, supplier_id) where ph.data between p_de and p_ate order by ph.product_id, ph.supplier_id, ph.data, ph.id),
+    ini as (select m.product_id, m.supplier_id, coalesce(a.u, f.u) u, coalesce(a.data, f.data) data, coalesce(a.invoice_id, f.invoice_id) invoice_id
+              from mud m left join antes a using (product_id, supplier_id) left join primeiro f using (product_id, supplier_id)),
+    fim as (select distinct on (ph.product_id, ph.supplier_id) ph.product_id, ph.supplier_id, ph.u, ph.data
+                from ph join mud using (product_id, supplier_id) where ph.data <= p_ate order by ph.product_id, ph.supplier_id, ph.data desc, ph.id desc),
+    compras as (select ph.product_id, ph.supplier_id, ph.invoice_id, ph.u,
+                  (select coalesce(sum(pl.qty), 0) from public.compras_purchase_lines pl where pl.invoice_id = ph.invoice_id and pl.product_id = ph.product_id and pl.qty > 0) q
+                  from ph join mud using (product_id, supplier_id) where ph.data between p_de and p_ate),
+    per as (select c.product_id, c.supplier_id, min(c.u) pmin, max(c.u) pmax, count(*) n, sum(c.q) q, sum((c.u - i.u) * c.q) impacto,
+                   bool_or(exists (select 1 from est where est.invoice_id = c.invoice_id and est.product_id = c.product_id)) est
+              from compras c join ini i using (product_id, supplier_id) group by 1, 2),
+    qtd as (select pl.product_id, i.supplier_id, sum(pl.qty) q from public.compras_purchase_lines pl join public.compras_invoices i on i.id = pl.invoice_id
+             where pl.data > p_ate - 90 and pl.data <= p_ate and pl.qty > 0 group by 1, 2),
+    vend as (select distinct recipe_guara_id g from public.compras_zs_items where recipe_guara_id is not null and not ignorar),
+    pr as (select u.product_id, count(distinct u.root) n from public.compras__recipe_usage() u join vend on vend.g = u.root group by 1)
+    select jsonb_agg(jsonb_build_object(
+        'product_id', m.product_id, 'produto', p.nome, 'categoria', p.categoria, 'unidade', p.unidade,
+        'supplier_id', m.supplier_id, 'fornecedor', s.nome,
+        'preco_inicio', round(i.u, 4), 'data_inicio', i.data, 'preco_fim', round(f.u, 4), 'data_fim', f.data,
+        'var_pct', round((f.u / nullif(i.u, 0) - 1) * 100, 1), 'mudancas', m.n,
+        'preco_min', round(least(per.pmin, i.u), 4), 'preco_max', round(greatest(per.pmax, i.u), 4), 'compras', per.n,
+        'qtd_periodo', round(per.q, 3), 'impacto_periodo', round(per.impacto, 2), 'qtd_mes', round(coalesce(q.q, 0) / 3, 3),
+        'estimado', per.est or exists (select 1 from est where est.invoice_id = i.invoice_id and est.product_id = m.product_id),
+        'pratos', coalesce(pr.n, 0))
+      order by abs(f.u / nullif(i.u, 0) - 1) desc)
+    from mud m join ini i using (product_id, supplier_id) join fim f using (product_id, supplier_id) join per using (product_id, supplier_id)
+    join public.compras_products p on p.id = m.product_id join public.compras_suppliers s on s.id = m.supplier_id
+    left join qtd q on q.product_id = m.product_id and q.supplier_id = m.supplier_id
+    left join pr on pr.product_id = m.product_id), '[]');
+end $$;
