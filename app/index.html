@@ -224,7 +224,7 @@ input,select,textarea{font-size:16px!important}
 .group.closed>header{border-bottom:0}
 .group.ocard{box-shadow:0 3px 12px rgba(31,59,52,.14),0 1px 3px rgba(0,0,0,.08)}
 .group.ocard.closed{box-shadow:0 2px 8px rgba(31,59,52,.12),0 1px 2px rgba(0,0,0,.06)}
-.bell{border:0;background:none;min-height:30px;padding:2px 6px;color:var(--muted);display:inline-flex;align-items:center}
+.bell{text-decoration:none;border:0;background:none;min-height:30px;padding:2px 6px;color:var(--muted);display:inline-flex;align-items:center}
 .bell svg{width:20px;height:20px}
 .bell[aria-pressed="true"]{color:var(--accent)}
 .rej{color:var(--bad);font-weight:600;font-size:14px}
@@ -246,7 +246,7 @@ input,select,textarea{font-size:16px!important}
   <header class="top">
     <div class="wrap">
       <div class="brand"><h1 id="rname">Compras</h1>
-        <div class="menu"><span id="who"></span><button class="bell" id="bellBtn" data-action="push-toggle" aria-pressed="false" aria-label="Notificações" title="Notificações"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button><button class="link" data-action="pin-form">PIN</button><button class="link" data-action="logout">Sair</button></div></div>
+        <div class="menu"><span id="who"></span><a class="bell" id="boLink" href="/backoffice" hidden aria-label="Back office" title="Back office"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h5v-6h4v6h5V9.5"/></svg></a><button class="bell" id="bellBtn" data-action="push-toggle" aria-pressed="false" aria-label="Notificações" title="Notificações"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button><button class="link" data-action="pin-form">PIN</button><button class="link" data-action="logout">Sair</button></div></div>
       <nav class="tabs" aria-label="Secções">
         <a href="#encomendar" data-view="encomendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Encomendar</a>
         <a href="#carrinho" data-view="carrinho"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.6 12.4a1 1 0 0 0 1 .8h9.8a1 1 0 0 0 1-.8L21 7H6"/></svg>Carrinho <span class="count" id="cntCart" hidden></span></a>
@@ -401,6 +401,7 @@ async function start(){
   $("#loginView").hidden = true; $("#appView").hidden = false;
   document.querySelectorAll("[data-chefe]").forEach(el => el.hidden = !isChefe());
   $("#who").textContent = S.me.nome;
+  $("#boLink").hidden = !S.me.dono;  // atalho para o back office, só para o dono
   const ks = SETORES.map(x => x[0]); const saved = ls.get("cf_setor", null);
   S.setor = ks.includes(saved) ? saved : (ks.includes(S.me.setor) ? S.me.setor : "cozinha");
   for (const k of Object.keys(S.cart)) if (k.split("|").length === 2) { S.cart[k + "|" + S.setor] = (S.cart[k + "|" + S.setor] || 0) + S.cart[k]; delete S.cart[k]; }

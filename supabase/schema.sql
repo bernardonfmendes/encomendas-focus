@@ -2830,3 +2830,14 @@ begin
       order by lower(p.nome))
     from public.compras_products p left join pr on pr.product_id = p.id), '[]');
 end $$;
+
+-- A app sabe se quem entrou é o dono (mostra o atalho com a casa para o back office)
+create or replace function public.compras_me(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  return jsonb_build_object('id', u.id, 'nome', u.nome, 'role', u.role, 'setor', u.setor,
+    'restaurante', (select restaurante from public.compras_settings where id = 1),
+    'dono', u.id = (select dono_id from public.compras_settings where id = 1));
+end $function$;
