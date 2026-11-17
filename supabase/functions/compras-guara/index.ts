@@ -8,6 +8,7 @@
 //   repartido pelos preços das linhas (fica o preço bruto em price_bruto).
 // { "modo": "receitas" } lê as primeiras páginas da lista de receitas (as mexidas há menos tempo), abre cada uma e grava
 //   as novas e as que mudaram (nome, rendimento, PVP ou ingredientes) com compras__import_recipes (nunca apaga receitas).
+// { "modo": "releitura", "pag_de", "pag_ate", "desde" } lê faturas antigas para compras_guara_releitura (ver a função).
 // "ensaio": true devolve o que leu e não grava nada. "ver" / "padrao" servem só para diagnóstico.
 const BASE = "https://guara.pt";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
@@ -162,16 +163,42 @@ function lerLinhasFatura(raw: string) {
   return { extrair, linhas };
 }
 
+// Lê as linhas de uma fatura e acerta os preços: "pago" quando o Guará o mostra; desconto no fim da fatura (ex.: Sumol
+// Compal) repartido pelos produtos (o vasilhame e os depósitos não levam desconto), exceto quando a soma das linhas bate
+// com o total com IVA (linhas já com IVA: talho, Continente).
+async function montarFatura(s: Sessao, x: LinhaLista) {
+  const r = await s.get(`/invoices/${x.guara_id}/detail`);
+  const { extrair, linhas } = lerLinhasFatura(r.html);
+  if (!linhas.length) return { sem_linhas: true, extrair };
+  const valor = (l: { qty: number | null; price: number | null }) => (l.qty ?? 0) * (l.price ?? 0);
+  const somaCont = linhas.filter((l) => vasilhame(l.desc)).reduce((a, l) => a + valor(l), 0);
+  const somaProd = linhas.filter((l) => !vasilhame(l.desc)).reduce((a, l) => a + valor(l), 0);
+  const soma = somaProd + somaCont;
+  let desconto = 0;
+  const comIva = x.total != null && x.total > 0 && Math.abs(soma - x.total) <= x.total * 0.003;
+  if (x.sem_iva != null && x.sem_iva > 0 && somaProd > 0 && !comIva) {
+    const f = (x.sem_iva - somaCont) / somaProd;
+    if (f >= 0.4 && f <= 0.98) desconto = r4(1 - f);
+  }
+  const linhasFinais = linhas.map((l) => desconto && l.price != null && !vasilhame(l.desc) ? { ...l, price_bruto: l.price, price: r4(l.price * (1 - desconto)), desconto_pct: r4(desconto * 100) } : l);
+  return { fat: {
+    guara_id: x.guara_id, fornecedor_nome: x.fornecedor, numero: x.numero, data: x.data, total: x.total, total_sem_iva: x.sem_iva,
+    tipo: x.tipo, soma_linhas: r4(soma), desconto_pct: desconto ? r4(desconto * 100) : 0, linhas: linhasFinais,
+  } };
+}
+
+async function lerPaginas(s: Sessao, de: number, ate: number) {
+  const lista: LinhaLista[] = [];
+  await emParalelo(Array.from({ length: ate - de + 1 }, (_, i) => de + i), 3, async (p) => {
+    lista.push(...lerListaFaturas((await s.get(p === 1 ? "/invoices" : `/invoices?page=${p}`)).html));
+  });
+  return [...new Map(lista.map((x) => [x.guara_id, x])).values()];
+}
+
 async function faturas(s: Sessao, b: any) {
   const ensaio = b?.ensaio === true;
   const maxPag = Math.min(Number(b?.paginas) || 10, 40);
-  const lista: LinhaLista[] = [];
-  const paginas = Array.from({ length: maxPag }, (_, i) => i + 1);
-  await emParalelo(paginas, 3, async (p) => {
-    const r = await s.get(p === 1 ? "/invoices" : `/invoices?page=${p}`);
-    lista.push(...lerListaFaturas(r.html));
-  });
-  const unicas = [...new Map(lista.map((x) => [x.guara_id, x])).values()];
+  const unicas = await lerPaginas(s, 1, maxPag);
   const candidatas = unicas.filter((x) => x.linhas === "Concluído" && x.data >= DESDE);
   const vistas = new Set<number>();
   if (candidatas.length) {
@@ -182,28 +209,10 @@ async function faturas(s: Sessao, b: any) {
   const resultados: unknown[] = [];
   const lidas: unknown[] = [];
   await emParalelo(novas, 3, async (x) => {
-    const r = await s.get(`/invoices/${x.guara_id}/detail`);
-    const { extrair, linhas } = lerLinhasFatura(r.html);
-    if (!linhas.length) { resultados.push({ guara_id: x.guara_id, fornecedor: x.fornecedor, numero: x.numero, estado: "sem_linhas", extrair }); return; }
-    // desconto no fim da fatura (ex.: Sumol Compal): reparte pelos preços dos produtos (o vasilhame e os depósitos não
-    // levam desconto). Não mexe quando as linhas já trazem o IVA (a soma bate com o total com IVA, ex.: talho, Continente).
-    const valor = (l: { qty: number | null; price: number | null }) => (l.qty ?? 0) * (l.price ?? 0);
-    const somaCont = linhas.filter((l) => vasilhame(l.desc)).reduce((a, l) => a + valor(l), 0);
-    const somaProd = linhas.filter((l) => !vasilhame(l.desc)).reduce((a, l) => a + valor(l), 0);
-    const soma = somaProd + somaCont;
-    let desconto = 0;
-    const comIva = x.total != null && x.total > 0 && Math.abs(soma - x.total) <= x.total * 0.003;
-    if (x.sem_iva != null && x.sem_iva > 0 && somaProd > 0 && !comIva) {
-      const f = (x.sem_iva - somaCont) / somaProd;
-      if (f >= 0.4 && f <= 0.98) desconto = r4(1 - f);
-    }
-    const linhasFinais = linhas.map((l) => desconto && l.price != null && !vasilhame(l.desc) ? { ...l, price_bruto: l.price, price: r4(l.price * (1 - desconto)), desconto_pct: r4(desconto * 100) } : l);
-    const fat = {
-      guara_id: x.guara_id, fornecedor_nome: x.fornecedor, numero: x.numero, data: x.data, total: x.total, total_sem_iva: x.sem_iva,
-      tipo: x.tipo, soma_linhas: r4(soma), desconto_pct: desconto ? r4(desconto * 100) : 0, linhas: linhasFinais,
-    };
-    if (ensaio) { lidas.push(fat); return; }
-    const res = await rpc("compras_guara_receber", { p_fat: fat });
+    const m = await montarFatura(s, x);
+    if (!m.fat) { resultados.push({ guara_id: x.guara_id, fornecedor: x.fornecedor, numero: x.numero, estado: "sem_linhas", extrair: m.extrair }); return; }
+    if (ensaio) { lidas.push(m.fat); return; }
+    const res = await rpc("compras_guara_receber", { p_fat: m.fat });
     resultados.push({ guara_id: x.guara_id, fornecedor: x.fornecedor, numero: x.numero, ...res });
   });
   const info = {
@@ -215,6 +224,27 @@ async function faturas(s: Sessao, b: any) {
   if (ensaio) return { ...info, ensaio: true, lidas, lista: b?.lista ? unicas : undefined };
   await rpc("compras_guara_registo", { p_modo: "faturas", p_info: info });
   return info;
+}
+
+// { "modo": "releitura", "pag_de": 11, "pag_ate": 30, "desde": "2026-08-31" }: lê as faturas dessas páginas da lista
+// (com linhas e emitidas desde "desde") e guarda-as em compras_guara_releitura, sem mexer nas faturas da app.
+async function releitura(s: Sessao, b: any) {
+  const de = Math.max(1, Number(b?.pag_de) || 1);
+  const ate = Math.max(de, Math.min(Number(b?.pag_ate) || de + 19, de + 39));
+  const desde = /^\d{4}-\d{2}-\d{2}$/.test(String(b?.desde || "")) ? String(b.desde) : DESDE;
+  const unicas = await lerPaginas(s, de, ate);
+  const cand = unicas.filter((x) => x.linhas === "Concluído" && x.data >= desde);
+  let guardadas = 0;
+  const sem: unknown[] = [];
+  await emParalelo(cand, 3, async (x) => {
+    const m = await montarFatura(s, x);
+    if (!m.fat) { sem.push({ guara_id: x.guara_id, fornecedor: x.fornecedor, numero: x.numero }); return; }
+    await rpc("compras_guara_releitura_guardar", { p_fat: m.fat });
+    guardadas++;
+  });
+  const datas = unicas.map((x) => x.data).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+  return { ok: true, paginas: [de, ate], na_lista: unicas.length, com_linhas: cand.length, guardadas, sem_linhas: sem,
+    data_mais_antiga: datas[0] ?? null, data_mais_recente: datas[datas.length - 1] ?? null };
 }
 
 // ---------- receitas ----------
@@ -333,6 +363,7 @@ Deno.serve(async (req: Request) => {
     await s.entrar();
     if (modo === "faturas") return json(await faturas(s, b));
     if (modo === "receitas") return json(await receitas(s, b));
+    if (modo === "releitura") return json(await releitura(s, b));
     if (modo === "ver" || modo === "padrao") {
       const path = String(b.path || "/");
       if (!/^\/[A-Za-z0-9_\-\/?=&%.]*$/.test(path) || /log_out|delete|remove|apagar/i.test(path)) return json({ error: "caminho_nao_permitido" }, 400);
