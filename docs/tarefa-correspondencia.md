@@ -1,0 +1,47 @@
+# Tarefa agendada: correspondência diária
+
+Corre todos os dias às 10:47 (Lisboa), numa sessão nova do Claude na nuvem, depois das importações automáticas
+(vendas do ZSbms às 10:10, faturas do Guará às 10:30, receitas às 10:35). Precisa do conector Supabase.
+Texto da tarefa (é este o que está guardado na tarefa agendada "Correspondência diária das compras (Guará e ZSbms)"):
+
+```
+Tarefa diária da app de compras do restaurante Focus Sushi & Steak: fazer a correspondência do que entrou hoje do Guará e do ZSbms. Responde em português de Portugal, curto.
+
+Regras: usa só o conector Supabase (ferramentas mcp__Supabase__*, carrega-as com ToolSearch), projeto cckgrpmspyurgmbgtjdu, e só tabelas e funções compras_* (o mesmo projeto tem outra app: não mexas em mais nada). Se o conector Supabase não estiver disponível, para e diz isso no resumo. Nunca escrevas PINs, chaves ou palavras-passe. Não alteres funções nem estrutura; só dados, com as funções indicadas. Se uma decisão não for clara, não a tomes: deixa por decidir e diz no resumo.
+
+0. Ver como correu a importação desta manhã: select faturas_em, faturas, receitas_em, receitas from compras_guara_cfg; e select ultima_em, ultimo from compras_zs_cfg. Se alguma tiver ok=false ou não for de hoje, diz no resumo.
+
+1. Faturas pendentes: select guara_id, fornecedor, numero, data, dados from compras_guara_faturas where estado = 'pendente' order by data.
+   - Se a fatura não for de produtos (serviços: desinfestação, manutenção, software, renda, contabilidade, etc.): select compras_guara_ignorar(guara_id, 'motivo curto').
+   - Senão, para cada linha de dados->'linhas': se já existe oferta deste fornecedor para esta descrição (select o.product_id, o.pack_qty from compras_offers o where o.supplier_id = compras__fornecedor('<fornecedor>') and lower(o.alias) = lower('<desc>')), deixa a linha tal como está. Para as outras, acrescenta à linha:
+     * "product_id": um produto existente de compras_products (procura pelo nome, sinónimos e pelas ofertas de outros fornecedores: compras_offers.alias), ou, se não houver, "novo_nome" (nome curto e genérico em português, como os existentes), "categoria" (uma das existentes: Bebidas, Carne, Descartáveis, Legumes e fruta, Limpeza e higiene, Mercearia, Outros, Peixe e marisco) e "base_unit" ("un", "kg" ou "L");
+     * "pack_qty": quantas unidades de base_unit (a unidade do produto) vêm em cada embalagem da linha. Usa guara_embalagem como pista (ex.: "Água com gás — 6 L" num produto em L = 6; "Salmão — 1 kg" = 1; "C/2000" num produto em un = 2000); com unidade_fatura KG e produto ao kg, pack_qty = 1.
+     * Linhas que não são produto (portes, taxas, ecovalor, serviços) ficam sem product_id e sem novo_nome (não entram).
+     Não mudes "desc", "qty" nem "price". Importa com: select compras_guara_importar(guara_id, '<todas as linhas, em JSON>'::jsonb).
+   - Regras confirmadas pelo dono: açúcar FRUSTOCK à caixa de 10 kg; açúcar Delta é "Açúcar em saquetas (café)", à caixa; Ebi Fry = 10 un; "Kimchi Sauce 1l" (molho, 1 L) e "Kimchi no Moto 1,2 kg" são produtos diferentes; tomate cherry ao kg; bolos da avó à unidade (só muda o sabor); Ama ebi é o produto "Ama ebi (camarão doce)".
+
+2. Ingredientes sem produto nas receitas que se vendem (as outras receitas do Guará, de outros menus, não interessam):
+   with recursive arv(gid, depth) as (select distinct z.recipe_guara_id, 0 from compras_zs_items z where z.recipe_guara_id is not null and not z.ignorar union select i.sub_recipe_guara_id, a.depth + 1 from arv a join compras_recipes r on r.guara_id = a.gid join compras_recipe_items i on i.recipe_id = r.id where i.sub_recipe_guara_id is not null and a.depth < 8)
+   select i.ingrediente, i.unidade, count(*) usos, string_agg(distinct r.nome, '; ') receitas from arv a join compras_recipes r on r.guara_id = a.gid join compras_recipe_items i on i.recipe_id = r.id where i.product_id is null and i.sub_recipe_guara_id is null and compras__norm(i.ingrediente) not in (select ingrediente from compras_ingredientes_sem_produto) group by 1, 2 order by 3 desc;
+   - Se corresponde claramente a um produto que se compra (compras_products, mesma coisa e unidade compatível): select compras_ligar_ingrediente('<ingrediente>', '<product_id>').
+   - Se não (feito cá, ainda não comprado, ou dúvida): insert into compras_ingredientes_sem_produto (ingrediente, nota) values (compras__norm('<ingrediente>'), '<razão curta>') on conflict (ingrediente) do nothing.
+   - Não cries produtos novos para ingredientes.
+
+3. Artigos vendidos no ZSbms sem receita nem produto:
+   select z.codigo, z.descricao, (select sum(qtd) from compras_sales s where s.codigo = z.codigo and s.dia > current_date - 35) vendidos from compras_zs_items z where not z.ignorar and z.recipe_guara_id is null and z.product_id is null and not z.revisto.
+   Para cada um, vê como estão os parecidos (select z.descricao, z.recipe_guara_id, r.nome, z.product_id, z.fator, z.ignorar from compras_zs_items z left join compras_recipes r on r.guara_id = z.recipe_guara_id where z.recipe_guara_id is not null or z.product_id is not null) e decide:
+     * receita do Guará: recipe_guara_id = compras_recipes.guara_id, fator = receitas por cada venda (nas linhas "@" do all you can eat as doses são meias: fator 0.5, como "@1/2 Dose de maminha"; rolos do all you can eat = 0.5 do rolo, com pecas = 4; peças soltas de sushi com pecas = número de peças);
+     * bebidas com receita no Guará ("Gin Tanqueray", "Crf reserva dose", "Limoncello dose", "Caipirinha"...): usa a receita, fator 1 (a meia dose tem receita própria);
+     * produto vendido tal e qual (garrafas, latas, snacks): product_id, fator = quantidade do produto por venda na unidade do produto (garrafa/lata num produto em "un" = 1; garrafa de vinho de 0,75 L num produto em L = 0.75; dose de espirituosa sem receita num produto em L = 0.07, meia dose = 0.035);
+     * ignorar = true para menus cujos componentes vêm em linhas próprias, taxas e linhas informativas;
+     * "@Repetição N peças" = receita 'local-media-sushi' com fator N.
+   Grava só as decisões claras: update compras_zs_items set recipe_guara_id = ..., product_id = ..., fator = ..., ignorar = ..., pecas = ... (só sushi do all you can eat), revisto = true, atualizado_em = now() where codigo = ...; as outras deixa como estão e põe no resumo.
+
+4. Regista: select compras_guara_registo('correspondencia', '<JSON com: faturas_importadas, faturas_ignoradas, produtos_novos, ingredientes_ligados, ingredientes_sem_produto, artigos_zs_ligados, por_decidir>'::jsonb).
+
+5. Para o resumo, consulta também:
+   a) stock baixo (até 10): select p.nome, round(s.stock,2) stock, p.unidade, round(s.consumo_dia,2) consumo_dia from compras__stock_rows() s join compras_products p on p.id = s.product_id where s.consumo_dia > 0 and s.stock < s.consumo_dia * 3 order by s.stock / nullif(s.consumo_dia, 0) limit 10;
+   b) subidas de preço de 5% ou mais nos últimos 2 dias: compras_offers com prev_unit_price > 0, unit_price >= prev_unit_price * 1.05 e data >= current_date - 2, com os nomes de compras_products e compras_suppliers (até 10).
+
+6. Resumo final (curto, em lista; é o que o dono recebe no telemóvel): faturas importadas (fornecedor, número e artigos novos com produto e embalagem escolhidos), produtos novos criados, ingredientes ligados, artigos do ZSbms ligados, e o que ficou por decidir com a razão, para o dono rever.
+```

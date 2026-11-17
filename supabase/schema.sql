@@ -1403,3 +1403,483 @@ language sql security definer set search_path to 'public', 'extensions' as $$
 $$;
 revoke execute on function public.compras__zs_disparar() from public, anon, authenticated;
 select cron.schedule('compras-zs-vendas', '10 10,11 * * *', 'select public.compras__zs_disparar()');
+
+-- ============================================================
+-- Faturas e receitas do Guará sem PC (função compras-guara) e correspondência
+-- ============================================================
+-- Faturas e receitas do Guará sem PC: núcleos sem token (para a importação automática) e fila das faturas com artigos novos.
+
+-- 1) Gravar fatura: núcleo com o utilizador explícito; a versão da app continua a exigir chefe.
+create or replace function public.compras__save_invoice(p_user uuid, p_inv jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare
+  sid uuid; inv uuid := gen_random_uuid(); l jsonb; pid uuid; k text;
+  up numeric; pq numeric; pp numeric; prev public.compras_offers; n int := 0; newmap jsonb := '{}'; d date; v_nif text;
+  known_pid uuid; known_pq numeric; is_nc boolean; v_total numeric;
+begin
+  d := coalesce(nullif(p_inv->>'data','')::date, current_date);
+  v_nif := regexp_replace(coalesce(p_inv->>'nif',''), '\D', '', 'g');
+  v_total := nullif(p_inv->>'total','')::numeric;
+  -- nota de crédito: total negativo ou número começado por NC
+  is_nc := coalesce(v_total, 0) < 0 or coalesce(p_inv->>'numero','') ~* '^\s*NC';
+  sid := nullif(p_inv->>'supplier_id','')::uuid;
+  if sid is null and v_nif <> '' then
+    select s.id into sid from public.compras_suppliers s where s.nif = v_nif limit 1;
+  end if;
+  if sid is null then
+    insert into public.compras_suppliers (nome, nif) values (coalesce(nullif(trim(p_inv->>'fornecedor_nome'),''), 'Fornecedor'), v_nif) returning id into sid;
+  elsif v_nif <> '' then
+    update public.compras_suppliers s set nif = v_nif where s.id = sid and s.nif = '';
+  end if;
+  insert into public.compras_invoices (id, supplier_id, fornecedor_nome, numero, data, total, linhas, created_by)
+  values (inv, sid, (select s.nome from public.compras_suppliers s where s.id = sid), coalesce(p_inv->>'numero',''), d,
+          v_total, coalesce(p_inv->'linhas','[]'::jsonb), p_user);
+  for l in select * from jsonb_array_elements(coalesce(p_inv->'linhas','[]'::jsonb)) loop
+    pp := nullif(l->>'price','')::numeric;
+    pq := coalesce(nullif(l->>'pack_qty','')::numeric, 1);
+    if pq <= 0 then pq := 1; end if;
+    if pp is null or pp < 0 then continue; end if;
+    -- vasilhame / caução não é produto (ex.: "Barril Damm 50L Vas")
+    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o)' or coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)' then continue; end if;
+    pid := nullif(l->>'product_id','')::uuid;
+    -- artigo já conhecido neste fornecedor (pela descrição da fatura): usa sempre o mesmo produto e a mesma embalagem.
+    -- Se o produto vier escolhido à mão (revisão na app), vale o que o chefe escolheu.
+    known_pid := null; known_pq := null;
+    if coalesce(l->>'desc','') <> '' then
+      select o.product_id, o.pack_qty into known_pid, known_pq from public.compras_offers o
+       where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc') limit 1;
+    end if;
+    if pid is null and known_pid is not null then
+      pid := known_pid;
+      if known_pq > 0 then pq := known_pq; end if;
+    end if;
+    up := pp / pq;
+    if pid is null then
+      k := lower(trim(coalesce(l->>'novo_nome','')));
+      if k = '' then continue; end if;
+      if newmap ? k then pid := (newmap->>k)::uuid;
+      else
+        select p.id into pid from public.compras_products p where lower(p.nome) = k limit 1;
+        if pid is null then
+          insert into public.compras_products (nome, categoria, unidade)
+          values (trim(l->>'novo_nome'), coalesce(nullif(l->>'categoria',''),'Outros'),
+                  case when l->>'base_unit' in ('un','kg','L') then l->>'base_unit' else 'un' end)
+          returning id into pid;
+        end if;
+        newmap := newmap || jsonb_build_object(k, pid);
+      end if;
+    end if;
+    -- nota de crédito: tira stock e não conta como preço de compra
+    if is_nc then
+      if nullif(l->>'qty','') is not null then
+        insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, -abs((l->>'qty')::numeric * pq));
+      end if;
+      n := n + 1;
+      continue;
+    end if;
+    insert into public.compras_price_history (product_id, supplier_id, data, unit_price, invoice_id) values (pid, sid, d, up, inv);
+    if nullif(l->>'qty','') is not null then
+      insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, (l->>'qty')::numeric * pq);
+    end if;
+    select * into prev from public.compras_offers o where o.product_id = pid and o.supplier_id = sid;
+    if not found then
+      insert into public.compras_offers (product_id, supplier_id, alias, codigo, pack_qty, pack_price, unit_price, prev_unit_price, data, invoice_id)
+      values (pid, sid, coalesce(l->>'desc',''), coalesce(l->>'codigo',''), pq, pp, up, null, d, inv);
+    elsif prev.data is null or d >= prev.data then
+      update public.compras_offers o set alias = coalesce(l->>'desc',''), codigo = coalesce(l->>'codigo',''), pack_qty = pq, pack_price = pp,
+        unit_price = up, prev_unit_price = case when prev.invoice_id = inv then prev.prev_unit_price when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null when up > 0 and prev.unit_price > 0 and (up / prev.unit_price >= 2.5 or up / prev.unit_price <= 0.4) then null else prev.unit_price end, prev_data = case when prev.invoice_id = inv then prev.prev_data when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null else prev.data end, data = d, invoice_id = inv
+       where o.product_id = pid and o.supplier_id = sid;
+    end if;
+    n := n + 1;
+  end loop;
+  return jsonb_build_object('invoice_id', inv, 'supplier_id', sid, 'linhas', n, 'nota_credito', is_nc);
+end $function$;
+revoke execute on function public.compras__save_invoice(uuid, jsonb) from public, anon, authenticated;
+
+create or replace function public.compras_save_invoice(p_token text, p_inv jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  return public.compras__save_invoice(u.id, p_inv);
+end $function$;
+
+-- Fornecedor pelo nome (o mesmo critério da importação: igual ou começa pelo outro, sem espaços nem pontuação)
+create or replace function public.compras__fornecedor(p_nome text) returns uuid
+language sql stable security definer set search_path to 'public', 'extensions' as $function$
+  with k as (select lower(regexp_replace(trim(coalesce(p_nome,'')), '[^A-Za-z0-9]', '', 'g')) nk)
+  select s.id from public.compras_suppliers s, k
+   where k.nk <> '' and (lower(regexp_replace(s.nome, '[^A-Za-z0-9]', '', 'g')) = k.nk
+      or (length(k.nk) >= 4 and lower(regexp_replace(s.nome, '[^A-Za-z0-9]', '', 'g')) like k.nk || '%')
+      or (length(lower(regexp_replace(s.nome, '[^A-Za-z0-9]', '', 'g'))) >= 4 and k.nk like lower(regexp_replace(s.nome, '[^A-Za-z0-9]', '', 'g')) || '%'))
+   order by s.created_at limit 1
+$function$;
+revoke execute on function public.compras__fornecedor(text) from public, anon, authenticated;
+
+create or replace function public.compras__import_invoice(p_user uuid, p_inv jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare sid uuid; nome text; numk text;
+begin
+  nome := trim(coalesce(p_inv->>'fornecedor_nome',''));
+  numk := lower(regexp_replace(coalesce(p_inv->>'numero',''), '\s', '', 'g'));
+  if lower(regexp_replace(nome, '[^A-Za-z0-9]', '', 'g')) = '' or numk = '' then return jsonb_build_object('ignorada', 'sem_dados'); end if;
+  sid := public.compras__fornecedor(nome);
+  if sid is not null and exists (select 1 from public.compras_invoices i where i.supplier_id = sid and lower(regexp_replace(coalesce(i.numero,''), '\s', '', 'g')) = numk) then
+    return jsonb_build_object('ignorada', 'repetida');
+  end if;
+  if sid is null then
+    insert into public.compras_suppliers (nome) values (nome) returning id into sid;
+  end if;
+  return public.compras__save_invoice(p_user, p_inv || jsonb_build_object('supplier_id', sid));
+end $function$;
+revoke execute on function public.compras__import_invoice(uuid, jsonb) from public, anon, authenticated;
+
+create or replace function public.compras_import_invoice(p_token text, p_inv jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  return public.compras__import_invoice(u.id, p_inv);
+end $function$;
+
+-- 2) Receitas: núcleo sem token
+create or replace function public.compras__import_recipes(p_receitas jsonb, p_completo boolean default false) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare r jsonb; it jsonb; rid uuid; pid uuid; nr int := 0; ni int := 0; ns int := 0; ord int; k text; un text;
+begin
+  for r in select * from jsonb_array_elements(coalesce(p_receitas,'[]')) loop
+    if coalesce(r->>'guara_id','') = '' or coalesce(trim(r->>'nome'),'') = '' then continue; end if;
+    un := case when r->>'rendimento_unidade' in ('un','kg','L') then r->>'rendimento_unidade' else 'un' end;
+    insert into public.compras_recipes (guara_id, nome, categoria, rendimento, rendimento_unidade, preco_venda, extra, atualizado_em)
+    values (r->>'guara_id', trim(r->>'nome'), coalesce(r->>'categoria',''), nullif(r->>'rendimento','')::numeric, un,
+            nullif(r->>'preco_venda','')::numeric, coalesce(r->'extra','{}'::jsonb), now())
+    on conflict (guara_id) do update set nome = excluded.nome, categoria = excluded.categoria, rendimento = excluded.rendimento,
+      rendimento_unidade = excluded.rendimento_unidade, preco_venda = excluded.preco_venda, extra = excluded.extra, atualizado_em = now()
+    returning id into rid;
+    delete from public.compras_recipe_items where recipe_id = rid;
+    ord := 0;
+    for it in select * from jsonb_array_elements(coalesce(r->'ingredientes','[]')) loop
+      ord := ord + 1; pid := null;
+      if coalesce(it->>'sub_receita_id','') = '' then
+        k := public.compras__norm(it->>'nome');
+        select a.product_id into pid from public.compras_recipe_aliases a where a.ingrediente = k;
+        if pid is null then
+          select p.id into pid from public.compras_products p where public.compras__norm(p.nome) = k limit 1;
+        end if;
+        if pid is null then
+          select o.product_id into pid from public.compras_offers o where public.compras__norm(o.alias) = k limit 1;
+        end if;
+        if pid is null then ns := ns + 1; end if;
+      end if;
+      insert into public.compras_recipe_items (recipe_id, ordem, ingrediente, qty, unidade, perda_pct, product_id, sub_recipe_guara_id, extra)
+      values (rid, ord, coalesce(it->>'nome',''), nullif(it->>'qty','')::numeric,
+              case when it->>'unidade' in ('un','kg','L') then it->>'unidade' else 'un' end,
+              nullif(it->>'perda_pct','')::numeric, pid, nullif(it->>'sub_receita_id',''),
+              coalesce(it->'extra','{}'::jsonb) || case when it ? 'custo' then jsonb_build_object('custo_guara', it->'custo') else '{}'::jsonb end);
+      ni := ni + 1;
+    end loop;
+    nr := nr + 1;
+  end loop;
+  if p_completo then
+    delete from public.compras_recipes where guara_id not in (select x->>'guara_id' from jsonb_array_elements(coalesce(p_receitas,'[]')) x);
+  end if;
+  return jsonb_build_object('receitas', nr, 'ingredientes', ni, 'sem_produto', ns);
+end $function$;
+revoke execute on function public.compras__import_recipes(jsonb, boolean) from public, anon, authenticated;
+
+create or replace function public.compras_import_recipes(p_token text, p_receitas jsonb, p_completo boolean default false) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  return public.compras__import_recipes(p_receitas, p_completo);
+end $function$;
+
+-- 3) Faturas lidas do Guará (uma linha por fatura do Guará) e registo das execuções
+create table if not exists public.compras_guara_faturas (
+  guara_id int primary key,
+  fornecedor text not null default '',
+  numero text not null default '',
+  data date,
+  total numeric,
+  estado text not null check (estado in ('importada', 'pendente', 'ja_existia', 'ignorada')),
+  dados jsonb not null default '{}',     -- fatura tal como lida (linhas com desc, qty, unidade_fatura, price, guara_embalagem)
+  resultado jsonb,
+  criado_em timestamptz not null default now(),
+  tratado_em timestamptz
+);
+alter table public.compras_guara_faturas enable row level security;
+revoke all on public.compras_guara_faturas from anon, authenticated;
+
+create table if not exists public.compras_guara_cfg (
+  id boolean primary key default true check (id),
+  faturas_em timestamptz, faturas jsonb,
+  receitas_em timestamptz, receitas jsonb,
+  correspondencia_em timestamptz, correspondencia jsonb
+);
+alter table public.compras_guara_cfg enable row level security;
+revoke all on public.compras_guara_cfg from anon, authenticated;
+insert into public.compras_guara_cfg default values on conflict (id) do nothing;
+
+-- Ingredientes já vistos que não correspondem a nenhum produto comprado (feitos cá, sem fatura, etc.), para não voltar a tentar todos os dias
+create table if not exists public.compras_ingredientes_sem_produto (
+  ingrediente text primary key,   -- compras__norm(nome)
+  nota text not null default '',
+  revisto_em timestamptz not null default now()
+);
+alter table public.compras_ingredientes_sem_produto enable row level security;
+revoke all on public.compras_ingredientes_sem_produto from anon, authenticated;
+
+create or replace function public.compras__chefe_principal() returns uuid
+language sql stable security definer set search_path to 'public' as $$
+  select id from public.compras_users where role = 'chefe' and ativo order by created_at limit 1
+$$;
+revoke execute on function public.compras__chefe_principal() from public, anon, authenticated;
+
+-- Recebe uma fatura lida pela função compras-guara. Se todos os artigos já são conhecidos neste fornecedor, importa logo;
+-- senão fica 'pendente' para a correspondência (produto e embalagem dos artigos novos).
+create or replace function public.compras_guara_receber(p_fat jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare gid int := nullif(p_fat->>'guara_id','')::int; sid uuid; numk text; l jsonb; novas int := 0; uteis int := 0; r jsonb;
+begin
+  if gid is null then raise exception 'sem_guara_id'; end if;
+  if exists (select 1 from public.compras_guara_faturas where guara_id = gid) then return jsonb_build_object('estado', 'vista'); end if;
+  sid := public.compras__fornecedor(p_fat->>'fornecedor_nome');
+  numk := lower(regexp_replace(coalesce(p_fat->>'numero',''), '\s', '', 'g'));
+  if sid is not null and numk <> '' and exists (select 1 from public.compras_invoices i where i.supplier_id = sid and lower(regexp_replace(coalesce(i.numero,''), '\s', '', 'g')) = numk) then
+    insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, tratado_em)
+    values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric, 'ja_existia', p_fat, now());
+    return jsonb_build_object('estado', 'ja_existia');
+  end if;
+  for l in select * from jsonb_array_elements(coalesce(p_fat->'linhas','[]')) loop
+    if nullif(l->>'price','') is null then continue; end if;
+    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o)' or coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)' then continue; end if;
+    uteis := uteis + 1;
+    if sid is null or not exists (select 1 from public.compras_offers o where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc')) then novas := novas + 1; end if;
+  end loop;
+  if uteis > 0 and novas = 0 then
+    r := public.compras__import_invoice(public.compras__chefe_principal(), p_fat);
+    insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, resultado, tratado_em)
+    values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric,
+            case when r ? 'ignorada' then 'ja_existia' else 'importada' end, p_fat, r, now());
+    return jsonb_build_object('estado', case when r ? 'ignorada' then 'ja_existia' else 'importada' end) || r;
+  end if;
+  insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, resultado)
+  values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric,
+          'pendente', p_fat, jsonb_build_object('linhas', uteis, 'novas', novas));
+  return jsonb_build_object('estado', 'pendente', 'linhas', uteis, 'novas', novas);
+end $function$;
+revoke execute on function public.compras_guara_receber(jsonb) from public, anon, authenticated;
+grant execute on function public.compras_guara_receber(jsonb) to service_role;
+
+-- Correspondência (tarefa agendada do Claude): importa uma fatura pendente com as linhas já decididas
+-- (cada linha: a original + product_id OU novo_nome/categoria/base_unit, e pack_qty; sem produto nem novo_nome = não é produto).
+create or replace function public.compras_guara_importar(p_guara_id int, p_linhas jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare f public.compras_guara_faturas; r jsonb;
+begin
+  select * into f from public.compras_guara_faturas where guara_id = p_guara_id for update;
+  if not found or f.estado <> 'pendente' then raise exception 'fatura_nao_pendente'; end if;
+  r := public.compras__import_invoice(public.compras__chefe_principal(), f.dados || jsonb_build_object('linhas', coalesce(p_linhas, f.dados->'linhas')));
+  update public.compras_guara_faturas set estado = case when r ? 'ignorada' then 'ja_existia' else 'importada' end, resultado = r, tratado_em = now()
+   where guara_id = p_guara_id;
+  return r;
+end $function$;
+revoke execute on function public.compras_guara_importar(int, jsonb) from public, anon, authenticated;
+
+create or replace function public.compras_guara_ignorar(p_guara_id int, p_motivo text) returns void
+language sql security definer set search_path to 'public' as $$
+  update public.compras_guara_faturas set estado = 'ignorada', resultado = jsonb_build_object('motivo', p_motivo), tratado_em = now()
+   where guara_id = p_guara_id and estado = 'pendente'
+$$;
+revoke execute on function public.compras_guara_ignorar(int, text) from public, anon, authenticated;
+
+-- Liga um ingrediente do Guará a um produto (fica a regra para as próximas importações)
+create or replace function public.compras_ligar_ingrediente(p_ingrediente text, p_product uuid) returns int
+language plpgsql security definer set search_path to 'public' as $function$
+declare k text := public.compras__norm(p_ingrediente); n int;
+begin
+  if k = '' or p_product is null then raise exception 'dados_invalidos'; end if;
+  insert into public.compras_recipe_aliases (ingrediente, product_id) values (k, p_product)
+  on conflict (ingrediente) do update set product_id = excluded.product_id;
+  delete from public.compras_ingredientes_sem_produto where ingrediente = k;
+  update public.compras_recipe_items set product_id = p_product
+   where sub_recipe_guara_id is null and public.compras__norm(ingrediente) = k and product_id is distinct from p_product;
+  get diagnostics n = row_count;
+  return n;
+end $function$;
+revoke execute on function public.compras_ligar_ingrediente(text, uuid) from public, anon, authenticated;
+
+create or replace function public.compras_guara_registo(p_modo text, p_info jsonb) returns void
+language plpgsql security definer set search_path to 'public' as $function$
+begin
+  if p_modo = 'faturas' then update public.compras_guara_cfg set faturas_em = now(), faturas = p_info where id;
+  elsif p_modo = 'receitas' then update public.compras_guara_cfg set receitas_em = now(), receitas = p_info where id;
+  elsif p_modo = 'correspondencia' then update public.compras_guara_cfg set correspondencia_em = now(), correspondencia = p_info where id;
+  end if;
+end $function$;
+revoke execute on function public.compras_guara_registo(text, jsonb) from public, anon, authenticated;
+grant execute on function public.compras_guara_registo(text, jsonb) to service_role;
+grant execute on function public.compras__import_recipes(jsonb, boolean) to service_role;
+
+-- Faturas: depósitos (SDR) como vasilhame; ofertas a preço 0 só entram no stock; faturas sem artigos com preço ficam de lado.
+create or replace function public.compras__save_invoice(p_user uuid, p_inv jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare
+  sid uuid; inv uuid := gen_random_uuid(); l jsonb; pid uuid; k text;
+  up numeric; pq numeric; pp numeric; prev public.compras_offers; n int := 0; newmap jsonb := '{}'; d date; v_nif text;
+  known_pid uuid; known_pq numeric; is_nc boolean; v_total numeric;
+begin
+  d := coalesce(nullif(p_inv->>'data','')::date, current_date);
+  v_nif := regexp_replace(coalesce(p_inv->>'nif',''), '\D', '', 'g');
+  v_total := nullif(p_inv->>'total','')::numeric;
+  -- nota de crédito: total negativo ou número começado por NC
+  is_nc := coalesce(v_total, 0) < 0 or coalesce(p_inv->>'numero','') ~* '^\s*NC';
+  sid := nullif(p_inv->>'supplier_id','')::uuid;
+  if sid is null and v_nif <> '' then
+    select s.id into sid from public.compras_suppliers s where s.nif = v_nif limit 1;
+  end if;
+  if sid is null then
+    insert into public.compras_suppliers (nome, nif) values (coalesce(nullif(trim(p_inv->>'fornecedor_nome'),''), 'Fornecedor'), v_nif) returning id into sid;
+  elsif v_nif <> '' then
+    update public.compras_suppliers s set nif = v_nif where s.id = sid and s.nif = '';
+  end if;
+  insert into public.compras_invoices (id, supplier_id, fornecedor_nome, numero, data, total, linhas, created_by)
+  values (inv, sid, (select s.nome from public.compras_suppliers s where s.id = sid), coalesce(p_inv->>'numero',''), d,
+          v_total, coalesce(p_inv->'linhas','[]'::jsonb), p_user);
+  for l in select * from jsonb_array_elements(coalesce(p_inv->'linhas','[]'::jsonb)) loop
+    pp := nullif(l->>'price','')::numeric;
+    pq := coalesce(nullif(l->>'pack_qty','')::numeric, 1);
+    if pq <= 0 then pq := 1; end if;
+    if pp is null or pp < 0 then continue; end if;
+    -- vasilhame / caução / depósito não é produto (ex.: "Barril Damm 50L Vas")
+    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o|dep[oó]sito)' or coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)' then continue; end if;
+    pid := nullif(l->>'product_id','')::uuid;
+    -- artigo já conhecido neste fornecedor (pela descrição da fatura): usa sempre o mesmo produto e a mesma embalagem.
+    -- Se o produto vier escolhido à mão (revisão na app), vale o que o chefe escolheu.
+    known_pid := null; known_pq := null;
+    if coalesce(l->>'desc','') <> '' then
+      select o.product_id, o.pack_qty into known_pid, known_pq from public.compras_offers o
+       where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc') limit 1;
+    end if;
+    if pid is null and known_pid is not null then
+      pid := known_pid;
+      if known_pq > 0 then pq := known_pq; end if;
+    end if;
+    up := pp / pq;
+    if pid is null then
+      k := lower(trim(coalesce(l->>'novo_nome','')));
+      if k = '' then continue; end if;
+      if newmap ? k then pid := (newmap->>k)::uuid;
+      else
+        select p.id into pid from public.compras_products p where lower(p.nome) = k limit 1;
+        if pid is null then
+          insert into public.compras_products (nome, categoria, unidade)
+          values (trim(l->>'novo_nome'), coalesce(nullif(l->>'categoria',''),'Outros'),
+                  case when l->>'base_unit' in ('un','kg','L') then l->>'base_unit' else 'un' end)
+          returning id into pid;
+        end if;
+        newmap := newmap || jsonb_build_object(k, pid);
+      end if;
+    end if;
+    -- nota de crédito: tira stock e não conta como preço de compra
+    if is_nc then
+      if nullif(l->>'qty','') is not null then
+        insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, -abs((l->>'qty')::numeric * pq));
+      end if;
+      n := n + 1;
+      continue;
+    end if;
+    -- oferta (preço 0): entra no stock mas não conta como preço de compra
+    if pp = 0 then
+      if nullif(l->>'qty','') is not null then
+        insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, (l->>'qty')::numeric * pq);
+      end if;
+      n := n + 1;
+      continue;
+    end if;
+    insert into public.compras_price_history (product_id, supplier_id, data, unit_price, invoice_id) values (pid, sid, d, up, inv);
+    if nullif(l->>'qty','') is not null then
+      insert into public.compras_purchase_lines (invoice_id, product_id, data, qty) values (inv, pid, d, (l->>'qty')::numeric * pq);
+    end if;
+    select * into prev from public.compras_offers o where o.product_id = pid and o.supplier_id = sid;
+    if not found then
+      insert into public.compras_offers (product_id, supplier_id, alias, codigo, pack_qty, pack_price, unit_price, prev_unit_price, data, invoice_id)
+      values (pid, sid, coalesce(l->>'desc',''), coalesce(l->>'codigo',''), pq, pp, up, null, d, inv);
+    elsif prev.data is null or d >= prev.data then
+      update public.compras_offers o set alias = coalesce(l->>'desc',''), codigo = coalesce(l->>'codigo',''), pack_qty = pq, pack_price = pp,
+        unit_price = up, prev_unit_price = case when prev.invoice_id = inv then prev.prev_unit_price when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null when up > 0 and prev.unit_price > 0 and (up / prev.unit_price >= 2.5 or up / prev.unit_price <= 0.4) then null else prev.unit_price end, prev_data = case when prev.invoice_id = inv then prev.prev_data when lower(coalesce(prev.alias,'')) <> lower(coalesce(l->>'desc','')) then null else prev.data end, data = d, invoice_id = inv
+       where o.product_id = pid and o.supplier_id = sid;
+    end if;
+    n := n + 1;
+  end loop;
+  return jsonb_build_object('invoice_id', inv, 'supplier_id', sid, 'linhas', n, 'nota_credito', is_nc);
+end $function$;
+
+create or replace function public.compras_guara_receber(p_fat jsonb) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare gid int := nullif(p_fat->>'guara_id','')::int; sid uuid; numk text; l jsonb; novas int := 0; uteis int := 0; r jsonb;
+begin
+  if gid is null then raise exception 'sem_guara_id'; end if;
+  if exists (select 1 from public.compras_guara_faturas where guara_id = gid) then return jsonb_build_object('estado', 'vista'); end if;
+  sid := public.compras__fornecedor(p_fat->>'fornecedor_nome');
+  numk := lower(regexp_replace(coalesce(p_fat->>'numero',''), '\s', '', 'g'));
+  if sid is not null and numk <> '' and exists (select 1 from public.compras_invoices i where i.supplier_id = sid and lower(regexp_replace(coalesce(i.numero,''), '\s', '', 'g')) = numk) then
+    insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, tratado_em)
+    values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric, 'ja_existia', p_fat, now());
+    return jsonb_build_object('estado', 'ja_existia');
+  end if;
+  for l in select * from jsonb_array_elements(coalesce(p_fat->'linhas','[]')) loop
+    if nullif(l->>'price','') is null then continue; end if;
+    if coalesce(l->>'desc','') ~* '(vasilhame|cau[cç][aã]o|dep[oó]sito)' or coalesce(l->>'desc','') ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)' then continue; end if;
+    uteis := uteis + 1;
+    if sid is null or not exists (select 1 from public.compras_offers o where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc')) then novas := novas + 1; end if;
+  end loop;
+  if uteis > 0 and novas = 0 then
+    r := public.compras__import_invoice(public.compras__chefe_principal(), p_fat);
+    insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, resultado, tratado_em)
+    values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric,
+            case when r ? 'ignorada' then 'ja_existia' else 'importada' end, p_fat, r, now());
+    return jsonb_build_object('estado', case when r ? 'ignorada' then 'ja_existia' else 'importada' end) || r;
+  end if;
+  -- sem nenhum artigo com preço (só vasilhame, ou o Guará não leu os preços): fica de lado, com a razão
+  insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, resultado, tratado_em)
+  values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric,
+          case when uteis = 0 then 'ignorada' else 'pendente' end, p_fat,
+          case when uteis = 0 then jsonb_build_object('motivo', 'sem_artigos_com_preco') else jsonb_build_object('linhas', uteis, 'novas', novas) end,
+          case when uteis = 0 then now() end);
+  return jsonb_build_object('estado', case when uteis = 0 then 'ignorada' else 'pendente' end, 'linhas', uteis, 'novas', novas);
+end $function$;
+
+-- Fornecedor pelo nome: igual, começa pelo outro, ou (com 6+ letras) um contém o outro, por esta ordem
+-- (ex.: "W4U - WINE CONCEPT" no Guará = "Wine Concept" na app).
+create or replace function public.compras__fornecedor(p_nome text) returns uuid
+language sql stable security definer set search_path to 'public', 'extensions' as $function$
+  with k as (select lower(regexp_replace(trim(coalesce(p_nome,'')), '[^A-Za-z0-9]', '', 'g')) nk),
+  s as (select id, created_at, lower(regexp_replace(nome, '[^A-Za-z0-9]', '', 'g')) sk from public.compras_suppliers)
+  select s.id from s, k
+   where k.nk <> '' and s.sk <> '' and (s.sk = k.nk
+      or (length(k.nk) >= 4 and s.sk like k.nk || '%')
+      or (length(s.sk) >= 4 and k.nk like s.sk || '%')
+      or (length(k.nk) >= 6 and s.sk like '%' || k.nk || '%')
+      or (length(s.sk) >= 6 and k.nk like '%' || s.sk || '%'))
+   order by case when s.sk = k.nk then 0 when s.sk like k.nk || '%' or k.nk like s.sk || '%' then 1 else 2 end, s.created_at
+   limit 1
+$function$;
+revoke execute on function public.compras__fornecedor(text) from public, anon, authenticated;
+
+-- Guará sem PC: faturas às 10:30 e receitas às 10:35 (hora de Lisboa). O pg_cron corre em UTC, por isso cada tarefa
+-- está marcada às 9h e às 10h UTC e só avança quando em Lisboa são 10h (funciona no horário de inverno e de verão).
+create or replace function public.compras__guara_disparar(p_modo text) returns bigint
+language sql security definer set search_path to 'public', 'extensions' as $$
+  select net.http_post(
+    url := 'https://cckgrpmspyurgmbgtjdu.supabase.co/functions/v1/compras-guara',
+    body := jsonb_build_object('modo', p_modo),
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-zs-key', (select chave from public.compras_zs_cfg)),
+    timeout_milliseconds := 300000);
+$$;
+revoke execute on function public.compras__guara_disparar(text) from public, anon, authenticated;
+select cron.schedule('compras-guara-faturas', '30 9,10 * * *',
+  $$select public.compras__guara_disparar('faturas') where extract(hour from now() at time zone 'Europe/Lisbon') = 10$$);
+select cron.schedule('compras-guara-receitas', '35 9,10 * * *',
+  $$select public.compras__guara_disparar('receitas') where extract(hour from now() at time zone 'Europe/Lisbon') = 10$$);
