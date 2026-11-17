@@ -2297,3 +2297,178 @@ begin
           case when uteis = 0 then now() end);
   return jsonb_build_object('estado', case when uteis = 0 then 'ignorada' else 'pendente' end, 'linhas', uteis, 'novas', novas);
 end $function$;
+
+-- ============================================================
+-- Back office (página /backoffice): só o dono entra (compras_settings.dono_id).
+-- Lá só se mudam nomes: o nome do produto (o que os colaboradores veem) e o nome que vai na mensagem
+-- da encomenda de cada fornecedor (compras_offers.nome_encomenda; a descrição da fatura, alias, não se toca
+-- porque é por ela que as faturas são reconhecidas). O resto são relatórios de preços.
+-- ============================================================
+alter table public.compras_settings add column if not exists dono_id uuid references public.compras_users(id) on delete set null;
+update public.compras_settings set dono_id = public.compras__chefe_principal() where dono_id is null;
+alter table public.compras_offers add column if not exists nome_encomenda text not null default '';
+
+create or replace function public.compras__dono(p_token text) returns public.compras_users
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+declare u public.compras_users;
+begin
+  u := public.compras__chefe(p_token);
+  if u.id is distinct from (select dono_id from public.compras_settings where id = 1) then raise exception 'so_dono'; end if;
+  return u;
+end $$;
+revoke execute on function public.compras__dono(text) from public, anon, authenticated;
+
+-- A app passa a receber o nome na encomenda de cada oferta (para a mensagem ao fornecedor)
+create or replace function public.compras_catalog(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  return jsonb_build_object(
+    'restaurante', (select restaurante from public.compras_settings where id = 1),
+    'suppliers', coalesce((select jsonb_agg(jsonb_build_object('id', s.id, 'nome', s.nome, 'telefone', s.telefone, 'dias', s.dias, 'nif', s.nif, 'minimo', s.minimo, 'via', s.via) order by lower(s.nome)) from public.compras_suppliers s), '[]'),
+    'products', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade, 'setores', to_jsonb(p.setores),
+        'offers', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'alias', o.alias, 'nome_encomenda', o.nome_encomenda, 'codigo', o.codigo,
+             'pack_qty', o.pack_qty, 'pack_price', o.pack_price, 'unit_price', o.unit_price, 'prev_unit_price', o.prev_unit_price, 'prev_data', o.prev_data, 'data', o.data)
+             order by o.unit_price) from public.compras_offers o where o.product_id = p.id), '[]')
+      ) order by lower(p.nome)) from public.compras_products p), '[]')
+  );
+end $function$;
+
+create or replace function public.compras_bo_entrar(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+declare u public.compras_users;
+begin
+  u := public.compras__dono(p_token);
+  return jsonb_build_object('nome', u.nome, 'restaurante', (select restaurante from public.compras_settings where id = 1));
+end $$;
+
+-- Produtos com as ofertas de cada fornecedor e quantos pratos vendidos os usam
+create or replace function public.compras_bo_produtos(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+begin
+  perform public.compras__dono(p_token);
+  return coalesce((
+    with vend as (select distinct recipe_guara_id g from public.compras_zs_items where recipe_guara_id is not null and not ignorar),
+    pr as (select u.product_id, count(distinct u.root) n from public.compras__recipe_usage() u join vend on vend.g = u.root group by 1)
+    select jsonb_agg(jsonb_build_object('id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade,
+      'pratos', coalesce(pr.n, 0),
+      'ofertas', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'fornecedor', s.nome, 'alias', o.alias,
+           'nome_encomenda', o.nome_encomenda, 'codigo', o.codigo, 'pack_qty', o.pack_qty, 'pack_price', o.pack_price,
+           'unit_price', o.unit_price, 'data', o.data) order by o.unit_price)
+         from public.compras_offers o join public.compras_suppliers s on s.id = o.supplier_id where o.product_id = p.id), '[]'))
+      order by lower(p.nome))
+    from public.compras_products p left join pr on pr.product_id = p.id), '[]');
+end $$;
+
+-- Mudar o nome do produto (o que os colaboradores veem). O nome antigo fica como sinónimo nas receitas do Guará,
+-- para os ingredientes continuarem ligados ao produto.
+create or replace function public.compras_bo_nome_produto(p_token text, p_id uuid, p_nome text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+declare v text; antigo text;
+begin
+  perform public.compras__dono(p_token);
+  v := btrim(regexp_replace(coalesce(p_nome, ''), '\s+', ' ', 'g'));
+  if v = '' then raise exception 'nome_vazio'; end if;
+  if length(v) > 80 then raise exception 'nome_longo'; end if;
+  select nome into antigo from public.compras_products where id = p_id;
+  if not found then raise exception 'produto_nao_existe'; end if;
+  if exists (select 1 from public.compras_products where lower(nome) = lower(v) and id <> p_id) then raise exception 'nome_repetido'; end if;
+  if public.compras__norm(antigo) <> '' and public.compras__norm(antigo) <> public.compras__norm(v) then
+    insert into public.compras_recipe_aliases (ingrediente, product_id) values (public.compras__norm(antigo), p_id) on conflict (ingrediente) do nothing;
+  end if;
+  update public.compras_products set nome = v where id = p_id;
+  return jsonb_build_object('id', p_id, 'nome', v);
+end $$;
+
+-- Mudar o nome que vai na mensagem da encomenda a um fornecedor (vazio = volta à descrição da fatura)
+create or replace function public.compras_bo_nome_encomenda(p_token text, p_product uuid, p_supplier uuid, p_nome text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+declare v text;
+begin
+  perform public.compras__dono(p_token);
+  v := btrim(regexp_replace(coalesce(p_nome, ''), '\s+', ' ', 'g'));
+  if length(v) > 120 then raise exception 'nome_longo'; end if;
+  update public.compras_offers set nome_encomenda = v where product_id = p_product and supplier_id = p_supplier;
+  if not found then raise exception 'oferta_nao_existe'; end if;
+  return jsonb_build_object('product_id', p_product, 'supplier_id', p_supplier, 'nome_encomenda', v);
+end $$;
+
+-- Linhas de fatura com preço estimado (o Guará não mostrou o pago, ou mostrou-o mal), por fatura e produto
+create or replace function public.compras__precos_estimados() returns table(invoice_id uuid, product_id uuid, motivo text)
+language sql stable security definer set search_path to 'public' as $$
+  select i.id, coalesce(nullif(y->>'product_id','')::uuid,
+           (select o.product_id from public.compras_offers o where o.supplier_id = i.supplier_id and lower(o.alias) = lower(y->>'desc') limit 1),
+           (select a.product_id from public.compras_offer_aliases a where a.supplier_id = i.supplier_id and a.alias = lower(y->>'desc'))),
+         y->>'price_estimado'
+    from public.compras_invoices i, jsonb_array_elements(i.linhas) y
+   where y ? 'price_estimado'
+$$;
+revoke execute on function public.compras__precos_estimados() from public, anon, authenticated;
+
+-- Subidas e descidas de preço (por unidade base e por fornecedor) entre duas datas
+create or replace function public.compras_bo_precos(p_token text, p_de date, p_ate date) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+begin
+  perform public.compras__dono(p_token);
+  return coalesce((
+    with est as (select * from public.compras__precos_estimados()),
+    ph as (select h.product_id, h.supplier_id, h.invoice_id, h.data, avg(h.unit_price) u, min(h.id) id
+             from public.compras_price_history h group by 1, 2, 3, 4),
+    seq as (select ph.*, lag(u) over w pu, lag(data) over w pd, lag(invoice_id) over w pinv
+              from ph window w as (partition by product_id, supplier_id order by data, id)),
+    ev as (select * from seq where pu > 0 and abs(u / pu - 1) >= 0.005 and data between p_de and p_ate),
+    qtd as (select pl.product_id, i.supplier_id, sum(pl.qty) q from public.compras_purchase_lines pl join public.compras_invoices i on i.id = pl.invoice_id
+             where pl.data > p_ate - 90 and pl.data <= p_ate and pl.qty > 0 group by 1, 2),
+    vend as (select distinct recipe_guara_id g from public.compras_zs_items where recipe_guara_id is not null and not ignorar),
+    pr as (select u.product_id, count(distinct u.root) n from public.compras__recipe_usage() u join vend on vend.g = u.root group by 1)
+    select jsonb_agg(jsonb_build_object(
+        'product_id', ev.product_id, 'produto', p.nome, 'categoria', p.categoria, 'unidade', p.unidade,
+        'supplier_id', ev.supplier_id, 'fornecedor', s.nome, 'data', ev.data, 'data_anterior', ev.pd, 'numero', i.numero,
+        'preco', round(ev.u, 4), 'preco_anterior', round(ev.pu, 4), 'var_pct', round((ev.u / ev.pu - 1) * 100, 1),
+        'qtd_fatura', (select sum(pl.qty) from public.compras_purchase_lines pl where pl.invoice_id = ev.invoice_id and pl.product_id = ev.product_id),
+        'qtd_mes', round(coalesce(q.q, 0) / 3, 3),
+        'estimado', exists (select 1 from est where est.invoice_id = ev.invoice_id and est.product_id = ev.product_id),
+        'estimado_anterior', exists (select 1 from est where est.invoice_id = ev.pinv and est.product_id = ev.product_id),
+        'pratos', coalesce(pr.n, 0))
+      order by ev.data desc, abs(ev.u / ev.pu - 1) desc)
+    from ev join public.compras_products p on p.id = ev.product_id join public.compras_suppliers s on s.id = ev.supplier_id
+    join public.compras_invoices i on i.id = ev.invoice_id
+    left join qtd q on q.product_id = ev.product_id and q.supplier_id = ev.supplier_id
+    left join pr on pr.product_id = ev.product_id), '[]');
+end $$;
+
+-- Um produto: histórico de preços (faturas) e pratos vendidos que o usam, com o custo da dose
+create or replace function public.compras_bo_produto(p_token text, p_id uuid) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+declare r jsonb;
+begin
+  perform public.compras__dono(p_token);
+  with est as (select * from public.compras__precos_estimados() e where e.product_id = p_id),
+  hist as (select h.invoice_id, h.supplier_id, h.data, avg(h.unit_price) u, min(h.id) id from public.compras_price_history h where h.product_id = p_id group by 1, 2, 3),
+  ult as (select * from hist order by data desc, id desc limit 1),
+  ant as (select h.* from hist h, ult where h.supplier_id = ult.supplier_id and h.data < ult.data order by h.data desc, h.id desc limit 1),
+  use as (select * from public.compras__recipe_usage()),
+  preco as (select distinct on (product_id) product_id, unit_price from public.compras_price_history order by product_id, data desc, id desc),
+  vend as (select z.recipe_guara_id g, sum(s.qtd * z.fator) q from public.compras_sales s join public.compras_zs_items z on z.codigo = s.codigo
+            where s.dia > current_date - 30 and z.recipe_guara_id is not null and not z.ignorar group by 1),
+  mapeadas as (select distinct recipe_guara_id g from public.compras_zs_items where recipe_guara_id is not null and not ignorar),
+  pratos as (select r.guara_id, r.nome, r.preco_venda pvp, u.qty qtd_produto,
+               (select sum(u2.qty * coalesce(pc.unit_price, 0)) from use u2 left join preco pc on pc.product_id = u2.product_id where u2.root = r.guara_id) custo,
+               (select count(*) from use u2 left join preco pc on pc.product_id = u2.product_id where u2.root = r.guara_id and pc.unit_price is null) sem_preco,
+               coalesce(v.q, 0) vendidos_30d
+               from use u join public.compras_recipes r on r.guara_id = u.root join mapeadas m on m.g = r.guara_id left join vend v on v.g = r.guara_id
+              where u.product_id = p_id)
+  select jsonb_build_object(
+    'produto', (select jsonb_build_object('id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade) from public.compras_products p where p.id = p_id),
+    'preco_atual', (select u from ult), 'preco_anterior', (select u from ant), 'data_atual', (select data from ult), 'data_anterior', (select data from ant),
+    'historico', coalesce((select jsonb_agg(jsonb_build_object('data', h.data, 'fornecedor', s.nome, 'supplier_id', h.supplier_id, 'numero', i.numero,
+        'preco', round(h.u, 4), 'qtd', (select sum(pl.qty) from public.compras_purchase_lines pl where pl.invoice_id = h.invoice_id and pl.product_id = p_id),
+        'estimado', exists (select 1 from est where est.invoice_id = h.invoice_id)) order by h.data, h.id)
+      from hist h join public.compras_suppliers s on s.id = h.supplier_id join public.compras_invoices i on i.id = h.invoice_id), '[]'),
+    'pratos', coalesce((select jsonb_agg(jsonb_build_object('guara_id', guara_id, 'nome', nome, 'pvp', pvp, 'qtd_produto', round(qtd_produto, 5),
+        'custo', round(custo, 4), 'sem_preco', sem_preco, 'vendidos_30d', vendidos_30d) order by vendidos_30d desc, nome) from pratos), '[]'))
+  into r;
+  return r;
+end $$;

@@ -648,6 +648,9 @@ function waMessage(o, items){
   const lines = agg.map(it => {
     const q = Number(it.qty), pq = Number(it.pack_qty) || 1, bu = it.base_unit || "un";
     const qs = (pq === 1 && bu !== "un") ? num(q, 3) + " " + bu : num(q, 2) + " ×";
+    // nome escolhido pelo dono no back office para este fornecedor: vai só esse nome, sem embalagem nem referência
+    const p = S.products.find(x => x.id === it.product_id), of = p && p.offers.find(x => x.supplier_id === o.supplier_id);
+    if (of && of.nome_encomenda) return "- " + qs + " " + of.nome_encomenda;
     return "- " + qs + " " + (it.alias || it.nome) + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (it.codigo ? " (ref. " + it.codigo + ")" : "");
   }).join("\n");
   let m = saudacao() + "! Encomenda do " + ((S.me && S.me.restaurante) || "restaurante") + ":\n" + lines;
