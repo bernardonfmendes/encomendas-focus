@@ -500,7 +500,7 @@ function chrome(){
   }
   const cc = $("#cntCart"); cc.hidden = !ents.length; cc.textContent = ents.length;
   bar.hidden = !ents.length || S.view === "carrinho";
-  if (ents.length) { const tot = ents.reduce((t, e) => t + e.qty * e.o.pack_price, 0); $("#cartlink").innerHTML = `<span>Carrinho · ${ents.length} ${ents.length === 1 ? "artigo" : "artigos"}</span><span class="num">${eur(tot)} →</span>`; }
+  if (ents.length) { const tot = ents.reduce((t, e) => t + e.qty * precoEmb(e.o), 0); $("#cartlink").innerHTML = `<span>Carrinho · ${ents.length} ${ents.length === 1 ? "artigo" : "artigos"}</span><span class="num">${eur(tot)} →</span>`; }
 }
 function render(){
   if (!S.me) return;
@@ -587,6 +587,10 @@ function habituals(){
     .sort((a, b) => cnt[b.id] - cnt[a.id]).slice(0, 5);
 }
 const stepOf = (pq, bu) => (Number(pq) === 1 && bu && bu !== "un") ? 0.5 : 1;
+// forma de encomenda escolhida pelo dono no back office (ex.: abacate à unidade): só muda a encomenda, sem preço na linha
+const formaOf = o => (o && (o.forma_encomenda || o.forma)) || "";
+const precoEmb = o => formaOf(o) ? 0 : (Number(o.pack_price) || 0);
+const plural = (q, f) => (Math.abs(Number(q)) === 1 || f === "un" || !/[aeiou]$/i.test(f)) ? f : f + "s";
 const qLabel = (pq, bu) => Number(pq) !== 1 ? "emb." : (bu && bu !== "un" ? bu : "");
 function stepper(key, qty, step = 1, u = ""){ return `<div class="stepper"><button data-action="dec" data-k="${esc(key)}" data-st="${step}" aria-label="Menos">−</button><input class="qin" data-k="${esc(key)}" data-st="${step}" value="${num(qty,3)}" inputmode="decimal" aria-label="Quantidade${u ? " em " + esc(u) : ""}">${u ? `<span class="qu">${esc(u)}</span>` : ""}<button data-action="inc" data-k="${esc(key)}" data-st="${step}" aria-label="Mais">+</button></div>`; }
 function prodCard(p){
@@ -600,8 +604,8 @@ function prodCard(p){
       if (d >= 3) ch = ` <span class="tag up">↑${num(d,0)}%</span>`; else if (d <= -3) ch = ` <span class="tag down">↓${num(-d,0)}%</span>`; }
     const isPack = Number(o.pack_qty) !== 1;
     return `<div class="pl${S.pop === key ? " pop" : ""}">${main ? `<span class="pico" aria-hidden="true">${CAT_ICON[p.categoria] || "🛒"}</span>` : ""}<div class="pinfo">${main ? `<div class="pname">${esc(p.nome)}${inSite(p) ? "" : `<span class="stag">outro sítio</span>`}${isChefe() ? `<button class="edit" data-action="edit-prod" data-p="${p.id}" aria-label="Editar ${esc(p.nome)}">✎</button>` : ""}</div>` : ""}
-      ${main ? stockHint(p) : ""}<div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}</div></div>
-      ${qty ? stepper(key, qty, stepOf(o.pack_qty, bu), qLabel(o.pack_qty, bu)) : `<button class="addbtn" data-action="inc" data-k="${esc(key)}" aria-label="Adicionar ${esc(p.nome)} (${esc(s.nome || "")})">+</button>`}</div>`;
+      ${main ? stockHint(p) : ""}<div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}${formaOf(o) ? ` · pede-se em <b>${esc(formaOf(o))}</b>` : ""}</div></div>
+      ${qty ? (formaOf(o) ? stepper(key, qty, 1, formaOf(o)) : stepper(key, qty, stepOf(o.pack_qty, bu), qLabel(o.pack_qty, bu))) : `<button class="addbtn" data-action="inc" data-k="${esc(key)}" aria-label="Adicionar ${esc(p.nome)} (${esc(s.nome || "")})">+</button>`}</div>`;
   };
   const inCart = offs.some(o => S.cart[keyOf(o)] > 0);
   let h = `<div class="pitem${inCart ? " incart" : ""}">` + line(offs[0], true);
@@ -622,9 +626,9 @@ function viewCart(){
   const multi = new Set(ents.map(e => e.setor)).size > 1; let grand = 0;
   let h = `<h2 style="margin-bottom:10px">Carrinho</h2><div class="stack">`;
   for (const sid of Object.keys(by)) {
-    const es = by[sid]; const tot = es.reduce((t, e) => t + e.qty * e.o.pack_price, 0); grand += tot;
+    const es = by[sid]; const tot = es.reduce((t, e) => t + e.qty * precoEmb(e.o), 0); grand += tot;
     h += `<section class="group"><header><h3>${esc(shortSup(supById(sid).nome))}</h3><span class="num" style="font-weight:700">${eur(tot)}</span></header><ul class="items">`
-      + es.map(e => `<li><div><b>${esc(e.p.nome)}${multi ? `<span class="stag">${esc(setorNome(e.setor))}</span>` : ""}</b><small>${esc(unitInfo(e.o.pack_qty, e.p.unidade, e.o.pack_price))}</small></div>${stepper(e.key, e.qty, stepOf(e.o.pack_qty, e.p.unidade), qLabel(e.o.pack_qty, e.p.unidade))}<span class="num">${eur(e.qty * e.o.pack_price)}</span></li>`).join("")
+      + es.map(e => `<li><div><b>${esc(e.p.nome)}${multi ? `<span class="stag">${esc(setorNome(e.setor))}</span>` : ""}</b><small>${formaOf(e.o) ? "em " + esc(formaOf(e.o)) + " · sem preço" : esc(unitInfo(e.o.pack_qty, e.p.unidade, e.o.pack_price))}</small></div>${formaOf(e.o) ? stepper(e.key, e.qty, 1, formaOf(e.o)) : stepper(e.key, e.qty, stepOf(e.o.pack_qty, e.p.unidade), qLabel(e.o.pack_qty, e.p.unidade))}<span class="num">${formaOf(e.o) ? "—" : eur(e.qty * e.o.pack_price)}</span></li>`).join("")
       + `</ul>${cartMin(sid, tot) ? `<footer>${cartMin(sid, tot)}</footer>` : ""}</section>`;
   }
   return h + `<details class="more2" ${S.note ? "open" : ""}><summary>+ Nota para o fornecedor</summary><textarea id="cartnote" placeholder="Ex.: entregar antes das 11h" style="margin-top:8px">${esc(S.note)}</textarea></details>
@@ -644,12 +648,13 @@ function saudacao(d = new Date()){ const h = d.getHours(); return h >= 5 && h < 
 function waMessage(o, items){
   // ao fornecedor vai o total por produto (soma dos sítios)
   const agg = [], by = {};
-  items.filter(it => Number(it.qty) > 0).forEach(it => { const k = it.product_id || it.nome; if (by[k]) by[k].qty += Number(it.qty); else { by[k] = {...it, qty:Number(it.qty)}; agg.push(by[k]); } });
+  items.filter(it => Number(it.qty) > 0).forEach(it => { const k = (it.product_id || it.nome) + "|" + (it.forma || ""); if (by[k]) by[k].qty += Number(it.qty); else { by[k] = {...it, qty:Number(it.qty)}; agg.push(by[k]); } });
   const lines = agg.map(it => {
     const q = Number(it.qty), pq = Number(it.pack_qty) || 1, bu = it.base_unit || "un";
     const qs = (pq === 1 && bu !== "un") ? num(q, 3) + " " + bu : num(q, 2) + " ×";
     // nome escolhido pelo dono no back office para este fornecedor: vai só esse nome, sem embalagem nem referência
     const p = S.products.find(x => x.id === it.product_id), of = p && p.offers.find(x => x.supplier_id === o.supplier_id);
+    if (it.forma) return "- " + num(q, 2) + " " + plural(q, it.forma) + " " + ((of && of.nome_encomenda) || it.alias || it.nome);
     if (of && of.nome_encomenda) return "- " + qs + " " + of.nome_encomenda;
     return "- " + qs + " " + (it.alias || it.nome) + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (it.codigo ? " (ref. " + it.codigo + ")" : "");
   }).join("\n");
@@ -680,9 +685,9 @@ function orderCard(o){
   const head = `<header><button class="ohead" data-action="toggle-order" data-o="${o.id}" aria-expanded="${open}"><div class="otitle"><h3>${esc(shortSup(o.fornecedor))}${sits ? `<span class="stag">${esc(sits)}</span>` : ""}</h3><small class="muted">Pedido por ${esc(o.meu ? "si" : (o.criado_por || "—"))} · ${fmtDT(o.created_at)}${o.aprovado_por && o.status !== "pendente" ? " · " + (o.status === "rejeitada" ? "rejeitado" : "aprovado") + " por " + esc(o.aprovado_por) : ""}</small>${o.status === "rejeitada" && o.motivo ? `<small class="rej">Motivo: ${esc(o.motivo)}</small>` : ""}<small class="osum">${nIt} ${nIt === 1 ? "artigo" : "artigos"} · <b>${eur(tot)}</b>${falta > 0.005 ? ` · <span class="minw">faltam ${eur(falta)} para o mínimo</span>` : ""}</small></div>${o.status === "enviada" || o.status === "rejeitada" ? `<span class="status st-${o.status}">${o.status}</span>` : ""}<span class="chev" aria-hidden="true">▾</span></button></header>`;
   let h = `<ul class="items">`;
   const multiS = new Set(items.map(it => it.setor).filter(Boolean)).size > 1;
-  h += items.map((it, i) => `<li><div><b>${esc(it.nome)}${multiS && it.setor ? `<span class="stag">${esc(setorNome(it.setor))}</span>` : ""}</b><small>${esc(unitInfo(it.pack_qty, it.base_unit, it.pack_price))}</small></div>
-    ${editing ? `<div class="stepper"><button data-action="oq" data-o="${o.id}" data-i="${i}" data-d="-${stepOf(it.pack_qty, it.base_unit)}" aria-label="Menos">−</button><span>${num(it.qty,3)}</span>${qLabel(it.pack_qty, it.base_unit) ? `<span class="qu">${esc(qLabel(it.pack_qty, it.base_unit))}</span>` : ""}<button data-action="oq" data-o="${o.id}" data-i="${i}" data-d="${stepOf(it.pack_qty, it.base_unit)}" aria-label="Mais">+</button></div>` : `<span class="num">${num(it.qty,3)} ${esc(qLabel(it.pack_qty, it.base_unit) || "×")}</span>`}
-    <span class="num">${eur((it.qty||0) * (it.pack_price||0))}</span></li>`).join("");
+  h += items.map((it, i) => `<li><div><b>${esc(it.nome)}${multiS && it.setor ? `<span class="stag">${esc(setorNome(it.setor))}</span>` : ""}</b><small>${it.forma ? "em " + esc(it.forma) + " · sem preço" : esc(unitInfo(it.pack_qty, it.base_unit, it.pack_price))}</small></div>
+    ${editing ? `<div class="stepper"><button data-action="oq" data-o="${o.id}" data-i="${i}" data-d="-${it.forma ? 1 : stepOf(it.pack_qty, it.base_unit)}" aria-label="Menos">−</button><span>${num(it.qty,3)}</span>${it.forma || qLabel(it.pack_qty, it.base_unit) ? `<span class="qu">${esc(it.forma || qLabel(it.pack_qty, it.base_unit))}</span>` : ""}<button data-action="oq" data-o="${o.id}" data-i="${i}" data-d="${it.forma ? 1 : stepOf(it.pack_qty, it.base_unit)}" aria-label="Mais">+</button></div>` : `<span class="num">${num(it.qty,3)} ${esc(it.forma || qLabel(it.pack_qty, it.base_unit) || "×")}</span>`}
+    <span class="num">${it.forma ? "—" : eur((it.qty||0) * (it.pack_price||0))}</span></li>`).join("");
   h += `</ul><footer><div class="total"><span>Total (sem IVA)</span><span>${eur(itemsTotal(items))}</span></div>`;
   if (o.status === "pendente" || o.status === "aprovada") h += minInfo(Number(o.minimo) || 0, itemsTotal(items));
   if (o.nota) h += `<small class="muted">Nota: ${esc(o.nota)}</small>`;

@@ -148,7 +148,7 @@ const ERR = {
   sessao_invalida:"A sessão terminou. Entre outra vez.", sem_permissao:"O back office é só para o dono.", so_dono:"O back office é só para o dono.",
   login_invalido:"Nome ou PIN errados.", bloqueado:"Demasiadas tentativas. Espere 15 minutos.",
   nome_vazio:"O nome não pode ficar vazio.", nome_longo:"O nome é demasiado comprido.", nome_repetido:"Já existe um produto com esse nome.",
-  produto_nao_existe:"Este produto já não existe. Recarregue a página.", oferta_nao_existe:"Este fornecedor já não tem este produto. Recarregue a página.", rede:"Sem ligação à internet."
+  produto_nao_existe:"Este produto já não existe. Recarregue a página.", oferta_nao_existe:"Este fornecedor já não tem este produto. Recarregue a página.", forma_longa:"O nome da forma é demasiado comprido (máx. 20 letras).", rede:"Sem ligação à internet."
 };
 const errMsg = e => ERR[(e && e.message) || ""] || "Algo correu mal. Tente outra vez.";
 
@@ -178,7 +178,7 @@ async function rpc(fn, args){
 // ---------- estado ----------
 const B = {
   token:null, daApp:false, me:null, tab:"produtos",
-  prods:[], q:"", fForn:"", fCat:"", fEnc:"",
+  prods:[], formas:[], q:"", fForn:"", fCat:"", fEnc:"",
   ev:[], res:[], vista:"resumo", per:"30", de:"", ate:"", eForn:"", eCat:"", eTipo:"", eMin:0, eEst:true, sort:{k:"data", dir:-1}, sortR:{k:"mes", dir:-1}, carregado:""
 };
 
@@ -233,7 +233,7 @@ window.addEventListener("hashchange", () => { if (B.token) irPara(location.hash.
 async function carregarProdutos(){
   const m = $("#main");
   if (!B.prods.length) m.innerHTML = `<p class="muted">A carregar os produtos…</p>`;
-  try { B.prods = await rpc("compras_bo_produtos", {p_token:B.token}) || []; }
+  try { const [pr, fo] = await Promise.all([rpc("compras_bo_produtos", {p_token:B.token}), rpc("compras_bo_formas", {p_token:B.token})]); B.prods = pr || []; B.formas = fo || []; }
   catch(e){ if (B.token) m.innerHTML = `<p class="banner">${esc(errMsg(e))}</p>`; return; }
   if (B.tab === "produtos") desenharProdutos();
 }
@@ -241,7 +241,7 @@ function fornecedores(){ const s = new Map(); B.prods.forEach(p => p.ofertas.for
 function desenharProdutos(){
   const forn = fornecedores();
   const cats = [...new Set(B.prods.map(p => p.categoria || "Outros"))].sort((a, b) => CATS.indexOf(a) - CATS.indexOf(b));
-  $("#main").innerHTML = `<p class="lead">Aqui só se mudam nomes. <b>Nome do produto</b>: o que os colaboradores veem quando encomendam. <b>Nome na encomenda</b>: o que vai na mensagem ao fornecedor (se ficar vazio, vai a descrição da fatura com a embalagem). Escreva e carregue Enter; Esc desfaz.</p>
+  $("#main").innerHTML = `<p class="lead">Aqui só se mudam nomes. <b>Nome do produto</b>: o que os colaboradores veem quando encomendam. <b>Nome na encomenda</b>: o que vai na mensagem ao fornecedor (se ficar vazio, vai a descrição da fatura com a embalagem). <b>Forma de encomenda</b>: como se pede a esse fornecedor (ex.: abacate à unidade); as faturas e o stock continuam na unidade do produto e essas linhas ficam sem preço na encomenda. Escreva e carregue Enter; Esc desfaz.</p>
     <div class="toolbar">
       <label class="f grow">Procurar<input id="q" type="search" value="${esc(B.q)}" placeholder="Nome, descrição da fatura ou fornecedor" autocomplete="off"></label>
       <label class="f">Fornecedor<select id="fForn"><option value="">Todos</option>${forn.map(([id, n]) => `<option value="${id}" ${B.fForn === id ? "selected" : ""}>${esc(n)}</option>`).join("")}<option value="-" ${B.fForn === "-" ? "selected" : ""}>Sem fornecedor</option></select></label>
@@ -249,7 +249,7 @@ function desenharProdutos(){
       <label class="f">Nome na encomenda<select id="fEnc"><option value="">Todos</option><option value="sem" ${B.fEnc === "sem" ? "selected" : ""}>Ainda por escrever</option><option value="com" ${B.fEnc === "com" ? "selected" : ""}>Já escritos</option></select></label>
     </div>
     <p class="count" id="pcount"></p>
-    <div class="tbl"><table><thead><tr><th>Nome do produto</th><th>Fornecedor</th><th>Descrição na fatura</th><th>Nome na encomenda</th><th class="num">Último preço</th><th class="num">Pratos</th></tr></thead><tbody id="pbody"></tbody></table></div>`;
+    <div class="tbl"><table><thead><tr><th>Nome do produto</th><th>Fornecedor</th><th>Descrição na fatura</th><th>Nome na encomenda</th><th>Forma de encomenda</th><th class="num">Último preço</th><th class="num">Pratos</th></tr></thead><tbody id="pbody"></tbody></table></div>`;
   linhasProdutos();
 }
 function linhasProdutos(){
@@ -269,23 +269,53 @@ function linhasProdutos(){
     const nomeCell = `<td rowspan="${Math.max(ofs.length, 1)}"><input class="ed" data-k="nome" data-p="${p.id}" value="${esc(p.nome)}" data-orig="${esc(p.nome)}" aria-label="Nome do produto ${esc(p.nome)}" maxlength="80"><span class="st"></span>
       <small class="muted" style="padding-left:8px">${esc(p.categoria || "Outros")} · ${esc(p.unidade)} · <button class="link" data-action="detalhe" data-p="${p.id}">histórico e pratos</button></small></td>`;
     const pratosCell = `<td class="num" rowspan="${Math.max(ofs.length, 1)}">${p.pratos ? `<button class="link" data-action="detalhe" data-p="${p.id}">${p.pratos}</button>` : '<span class="muted">—</span>'}</td>`;
-    if (!ofs.length) { rows.push(`<tr class="grp">${nomeCell}<td colspan="4" class="muted">Sem fornecedor (ainda não veio em nenhuma fatura)</td>${pratosCell}</tr>`); continue; }
+    if (!ofs.length) { rows.push(`<tr class="grp">${nomeCell}<td colspan="5" class="muted">Sem fornecedor (ainda não veio em nenhuma fatura)</td>${pratosCell}</tr>`); continue; }
     ofs.forEach((o, i) => {
       rows.push(`<tr class="${i === 0 ? "grp" : ""}">${i === 0 ? nomeCell : ""}
         <td>${esc(o.fornecedor)}</td>
         <td class="alias">${esc(o.alias)}${Number(o.pack_qty) !== 1 ? ` <span class="tag">${esc(packTxt(o.pack_qty, p.unidade))}</span>` : ""}${o.codigo ? ` <span class="tag">ref. ${esc(o.codigo)}</span>` : ""}</td>
         <td><input class="ed enc" data-k="enc" data-p="${p.id}" data-s="${o.supplier_id}" value="${esc(o.nome_encomenda)}" data-orig="${esc(o.nome_encomenda)}" placeholder="${esc(o.alias)}" maxlength="120" aria-label="Nome na encomenda a ${esc(o.fornecedor)}"><span class="st"></span>
           <span class="prev">${esc(previsao(o, p))}</span></td>
+        <td>${selForma(o, p)}<span class="st"></span></td>
         <td class="num">${o.unit_price != null ? eurU(o.unit_price) + "/" + esc(p.unidade) : "—"}<br><small class="muted">${fmtDate(o.data)}</small></td>
         ${i === 0 ? pratosCell : ""}</tr>`);
     });
   }
-  $("#pbody").innerHTML = rows.join("") || `<tr><td colspan="6" class="muted">Nenhum produto com estes filtros.</td></tr>`;
+  $("#pbody").innerHTML = rows.join("") || `<tr><td colspan="7" class="muted">Nenhum produto com estes filtros.</td></tr>`;
   $("#pcount").textContent = n + (n === 1 ? " produto" : " produtos");
 }
-// o que vai na mensagem ao fornecedor (igual à app: com nome na encomenda vai só o nome)
+// forma de encomenda: "como está" (unidade do produto ou embalagem), as formas da lista, ou uma nova
+const plural = (q, f) => (Math.abs(Number(q)) === 1 || f === "un" || !/[aeiou]$/i.test(f)) ? f : f + "s";
+function selForma(o, p){
+  const pq = Number(o.pack_qty) || 1, base = pq !== 1 ? "emb. de " + num(pq, 3) + " " + p.unidade : p.unidade;
+  const formas = [...new Set(B.formas.concat(o.forma_encomenda ? [o.forma_encomenda] : []))];
+  return `<select class="forma" data-p="${p.id}" data-s="${o.supplier_id}" data-orig="${esc(o.forma_encomenda)}" aria-label="Forma de encomenda a ${esc(o.fornecedor)}">
+    <option value="" ${!o.forma_encomenda ? "selected" : ""}>Como está (${esc(base)})</option>
+    ${formas.map(f => `<option value="${esc(f)}" ${o.forma_encomenda === f ? "selected" : ""}>${esc(f)}</option>`).join("")}
+    <option value="__nova">+ Nova forma…</option></select>`;
+}
+async function guardarForma(t){
+  let v = t.value;
+  const st = t.nextElementSibling;
+  if (v === "__nova") {
+    v = (prompt("Nome da nova forma de encomenda (ex.: bandeja, grade, pacote):") || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!v) { t.value = t.dataset.orig; return; }
+  }
+  st.className = "st"; st.textContent = "A guardar…";
+  try {
+    const r = await rpc("compras_bo_forma_encomenda", {p_token:B.token, p_product:t.dataset.p, p_supplier:t.dataset.s, p_forma:v});
+    const p = B.prods.find(x => x.id === t.dataset.p), o = p.ofertas.find(x => x.supplier_id === t.dataset.s);
+    o.forma_encomenda = r.forma_encomenda; t.dataset.orig = r.forma_encomenda;
+    if (r.forma_encomenda && !B.formas.includes(r.forma_encomenda)) { B.formas.push(r.forma_encomenda); }
+    const td = t.parentElement; td.innerHTML = selForma(o, p) + `<span class="st ok">✓ Guardado</span>`;
+    const pv = td.previousElementSibling.querySelector(".prev"); if (pv) pv.textContent = previsao(o, p);
+    setTimeout(() => { const s2 = td.querySelector(".st"); if (s2 && s2.textContent === "✓ Guardado") s2.textContent = ""; }, 2500);
+  } catch(e){ st.className = "st err"; st.textContent = errMsg(e); t.value = t.dataset.orig; }
+}
+// o que vai na mensagem ao fornecedor (igual à app: com forma, "2 caixas Nome"; com nome na encomenda vai só o nome)
 function previsao(o, p){
   const pq = Number(o.pack_qty) || 1, bu = p.unidade || "un";
+  if (o.forma_encomenda) return "Na mensagem: 2 " + plural(2, o.forma_encomenda) + " " + (o.nome_encomenda || o.alias);
   const qs = (pq === 1 && bu !== "un") ? "2 " + bu : "2 ×";
   if (o.nome_encomenda) return "Na mensagem: " + qs + " " + o.nome_encomenda;
   return "Na mensagem: " + qs + " " + o.alias + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (o.codigo ? " (ref. " + o.codigo + ")" : "");
@@ -296,6 +326,7 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("change", e => {
   const t = e.target;
+  if (t.classList && t.classList.contains("forma")) { guardarForma(t); return; }
   if (t.id === "fForn") { B.fForn = t.value; linhasProdutos(); }
   else if (t.id === "fCat") { B.fCat = t.value; linhasProdutos(); }
   else if (t.id === "fEnc") { B.fEnc = t.value; linhasProdutos(); }
@@ -332,7 +363,7 @@ async function guardarNome(t){
       const pv = t.parentElement.querySelector(".prev"); if (pv) pv.textContent = previsao(o, p);
     }
     st.className = "st ok"; st.textContent = "✓ Guardado"; setTimeout(() => { if (st.textContent === "✓ Guardado") st.textContent = ""; }, 2500);
-  } catch(e){ st.className = "st err"; st.textContent = errMsg(e); t.value = t.dataset.orig; }
+  } catch(e){ st.className = "st err"; st.textContent = errMsg(e); t.value = t.dataset.orig; const m = st.textContent; setTimeout(() => { if (st.textContent === m) st.textContent = ""; }, 6000); }
   finally { delete t.dataset.busy; }
 }
 

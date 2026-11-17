@@ -2575,3 +2575,129 @@ begin
     left join qtd q on q.product_id = m.product_id and q.supplier_id = m.supplier_id
     left join pr on pr.product_id = m.product_id), '[]');
 end $$;
+
+-- ============================================================
+-- Forma de encomenda por fornecedor (17/11, back office): ex.: abacate na FRUSTOCK pede-se à unidade, mas fatura-se ao kg.
+-- Só muda a encomenda (quantidade, passo de 1 e mensagem "10 un Abacate"); faturas, preços e stock continuam na unidade
+-- do produto. Vazio = como antes. As linhas com forma ficam sem preço na encomenda (sem peso aproximado, a pedido do dono).
+-- ============================================================
+alter table public.compras_offers add column if not exists forma_encomenda text not null default '';
+create table if not exists public.compras_formas_encomenda (nome text primary key, criado_em timestamptz not null default now());
+alter table public.compras_formas_encomenda enable row level security;
+revoke all on public.compras_formas_encomenda from anon, authenticated;
+insert into public.compras_formas_encomenda (nome) values ('un'), ('caixa'), ('molho'), ('cuvete'), ('saco') on conflict do nothing;
+
+create or replace function public.compras_catalog(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  return jsonb_build_object(
+    'restaurante', (select restaurante from public.compras_settings where id = 1),
+    'suppliers', coalesce((select jsonb_agg(jsonb_build_object('id', s.id, 'nome', s.nome, 'telefone', s.telefone, 'dias', s.dias, 'nif', s.nif, 'minimo', s.minimo, 'via', s.via) order by lower(s.nome)) from public.compras_suppliers s), '[]'),
+    'products', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade, 'setores', to_jsonb(p.setores),
+        'offers', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'alias', o.alias, 'nome_encomenda', o.nome_encomenda,
+             'forma_encomenda', o.forma_encomenda, 'codigo', o.codigo,
+             'pack_qty', o.pack_qty, 'pack_price', o.pack_price, 'unit_price', o.unit_price, 'prev_unit_price', o.prev_unit_price, 'prev_data', o.prev_data, 'data', o.data)
+             order by o.unit_price) from public.compras_offers o where o.product_id = p.id), '[]')
+      ) order by lower(p.nome)) from public.compras_products p), '[]')
+  );
+end $function$;
+
+-- Encomendas: a linha leva a forma (se houver) e fica sem preço; só se junta a uma linha aberta com a mesma forma
+create or replace function public.compras_submit_order(p_token text, p_items jsonb, p_nota text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; r record; n int := 0; j int := 0; ex public.compras_orders; merged jsonb; it jsonb; idx int; found_i boolean;
+begin
+  u := public.compras__user(p_token);
+  update public.compras_products p set setores = public.compras__setores(p.setores || array[i->>'setor'])
+    from jsonb_array_elements(coalesce(p_items,'[]')) i
+   where p.id = (i->>'product_id')::uuid and cardinality(p.setores) > 0
+     and (i->>'setor') in ('cozinha','sushi','bar','takeaway') and not ((i->>'setor') = any(p.setores));
+  for r in
+    select o.supplier_id, sup.nome as sup_nome,
+           jsonb_agg(jsonb_build_object('product_id', p.id, 'nome', p.nome, 'alias', o.alias, 'codigo', o.codigo,
+             'qty', x.qty, 'pack_qty', o.pack_qty, 'pack_price', case when o.forma_encomenda <> '' then null else o.pack_price end,
+             'base_unit', p.unidade, 'setor', x.setor) || case when o.forma_encomenda <> '' then jsonb_build_object('forma', o.forma_encomenda) else '{}'::jsonb end
+             order by p.nome, x.setor) as items
+      from (select (i->>'product_id')::uuid pid, (i->>'supplier_id')::uuid sid,
+                   case when (i->>'setor') in ('cozinha','sushi','bar','takeaway') then i->>'setor' else u.setor end setor,
+                   sum((i->>'qty')::numeric) qty
+              from jsonb_array_elements(coalesce(p_items,'[]')) i where (i->>'qty')::numeric > 0 group by 1,2,3) x
+      join public.compras_offers o on o.product_id = x.pid and o.supplier_id = x.sid
+      join public.compras_products p on p.id = o.product_id
+      join public.compras_suppliers sup on sup.id = o.supplier_id
+     group by o.supplier_id, sup.nome
+  loop
+    select * into ex from public.compras_orders
+     where supplier_id = r.supplier_id and status in ('pendente','aprovada')
+     order by created_at desc limit 1;
+    if found then
+      merged := ex.items;
+      for it in select * from jsonb_array_elements(r.items) loop
+        found_i := false;
+        for idx in 0 .. jsonb_array_length(merged) - 1 loop
+          if merged->idx->>'product_id' = it->>'product_id' and coalesce(merged->idx->>'setor','') = coalesce(it->>'setor','')
+             and coalesce(merged->idx->>'forma','') = coalesce(it->>'forma','') then
+            merged := jsonb_set(merged, array[idx::text, 'qty'], to_jsonb((merged->idx->>'qty')::numeric + (it->>'qty')::numeric));
+            found_i := true; exit;
+          end if;
+        end loop;
+        if not found_i then merged := merged || jsonb_build_array(it); end if;
+      end loop;
+      update public.compras_orders set items = merged,
+        nota = case when coalesce(p_nota,'') = '' then nota when nota = '' then left(p_nota, 500) else left(nota || ' / ' || p_nota, 500) end,
+        status = case when u.role = 'chefe' then 'aprovada' else 'pendente' end,
+        approved_by = case when u.role = 'chefe' then u.id else null end,
+        approved_at = case when u.role = 'chefe' then now() else null end
+      where id = ex.id;
+      j := j + 1;
+    else
+      insert into public.compras_orders (supplier_id, fornecedor_nome, items, nota, status, created_by, approved_by, approved_at)
+      values (r.supplier_id, r.sup_nome, r.items, left(coalesce(p_nota,''), 500),
+              case when u.role = 'chefe' then 'aprovada' else 'pendente' end, u.id,
+              case when u.role = 'chefe' then u.id end, case when u.role = 'chefe' then now() end);
+      n := n + 1;
+    end if;
+  end loop;
+  if n + j = 0 then raise exception 'carrinho_vazio'; end if;
+  return jsonb_build_object('encomendas', n, 'juntadas', j, 'aprovadas', u.role = 'chefe');
+end $function$;
+
+create or replace function public.compras_bo_formas(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+begin
+  perform public.compras__dono(p_token);
+  return coalesce((select jsonb_agg(nome order by case nome when 'un' then 0 else 1 end, nome) from public.compras_formas_encomenda), '[]');
+end $$;
+
+create or replace function public.compras_bo_forma_encomenda(p_token text, p_product uuid, p_supplier uuid, p_forma text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+declare v text;
+begin
+  perform public.compras__dono(p_token);
+  v := lower(btrim(regexp_replace(coalesce(p_forma, ''), '\s+', ' ', 'g')));
+  if length(v) > 20 then raise exception 'forma_longa'; end if;
+  if v <> '' then insert into public.compras_formas_encomenda (nome) values (v) on conflict do nothing; end if;
+  update public.compras_offers set forma_encomenda = v where product_id = p_product and supplier_id = p_supplier;
+  if not found then raise exception 'oferta_nao_existe'; end if;
+  return jsonb_build_object('product_id', p_product, 'supplier_id', p_supplier, 'forma_encomenda', v);
+end $$;
+
+create or replace function public.compras_bo_produtos(p_token text) returns jsonb
+language plpgsql security definer set search_path to 'public', 'extensions' as $$
+begin
+  perform public.compras__dono(p_token);
+  return coalesce((
+    with vend as (select distinct recipe_guara_id g from public.compras_zs_items where recipe_guara_id is not null and not ignorar),
+    pr as (select u.product_id, count(distinct u.root) n from public.compras__recipe_usage() u join vend on vend.g = u.root group by 1)
+    select jsonb_agg(jsonb_build_object('id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade,
+      'pratos', coalesce(pr.n, 0),
+      'ofertas', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'fornecedor', s.nome, 'alias', o.alias,
+           'nome_encomenda', o.nome_encomenda, 'forma_encomenda', o.forma_encomenda, 'codigo', o.codigo, 'pack_qty', o.pack_qty, 'pack_price', o.pack_price,
+           'unit_price', o.unit_price, 'data', o.data) order by o.unit_price)
+         from public.compras_offers o join public.compras_suppliers s on s.id = o.supplier_id where o.product_id = p.id), '[]'))
+      order by lower(p.nome))
+    from public.compras_products p left join pr on pr.product_id = p.id), '[]');
+end $$;
