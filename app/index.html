@@ -183,6 +183,7 @@ details.more2>summary{cursor:pointer;color:var(--muted);font-size:13px;font-weig
 /* sem zoom */
 html{touch-action:manipulation;-webkit-text-size-adjust:100%;text-size-adjust:100%}
 input,select,textarea{font-size:16px!important}
+.stepper .fsel{border:0;min-height:38px;width:auto;padding:0 2px;background:transparent;font-weight:700;font-size:13px;color:var(--muted);cursor:pointer}
 .stepper .qin{width:44px;min-height:38px;border:0;border-radius:0;padding:0;text-align:center;font-weight:700;background:transparent;font-variant-numeric:tabular-nums}
 .stepper .qu{font-size:12px;color:var(--muted);margin:0 2px 0 -4px}
 .pico{flex:0 0 auto;width:40px;height:40px;border-radius:12px;background:var(--nori-soft);display:flex;align-items:center;justify-content:center;font-size:21px}
@@ -321,7 +322,7 @@ async function rpc(fn, args){
 // ---------- state ----------
 const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
-  view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}),
+  view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}), cartForma: ls.get("cf_cart_forma", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
   users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", fatTab:null, fatF:"todos", renaming:null, stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, note:"", gq:"", confirmCancelOrd:null, showDiff:false
 };
@@ -329,11 +330,11 @@ const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
 const supById = id => S.suppliers.find(s => s.id === id) || {};
 const prodById = id => S.products.find(p => p.id === id);
-function saveCart(){ ls.set("cf_cart", S.cart); }
+function saveCart(){ ls.set("cf_cart", S.cart); ls.set("cf_cart_forma", S.cartForma); }
 function cartEntries(){
   return Object.entries(S.cart).map(([k, qty]) => {
     const [pid, sid, setor] = k.split("|"); const p = prodById(pid); const o = p && p.offers.find(x => x.supplier_id === sid);
-    return p && o && qty > 0 ? {key:k, pid, sid, setor:setor || S.setor, qty, p, o} : null;
+    return p && o && qty > 0 ? {key:k, pid, sid, setor:setor || S.setor, qty, p, o, f:formaSel(k, o)} : null;
   }).filter(Boolean);
 }
 const itemsTotal = items => items.reduce((t, it) => t + (Number(it.qty)||0) * (Number(it.pack_price)||0), 0);
@@ -500,7 +501,7 @@ function chrome(){
   }
   const cc = $("#cntCart"); cc.hidden = !ents.length; cc.textContent = ents.length;
   bar.hidden = !ents.length || S.view === "carrinho";
-  if (ents.length) { const tot = ents.reduce((t, e) => t + e.qty * precoEmb(e.o), 0); $("#cartlink").innerHTML = `<span>Carrinho · ${ents.length} ${ents.length === 1 ? "artigo" : "artigos"}</span><span class="num">${eur(tot)} →</span>`; }
+  if (ents.length) { const tot = ents.reduce((t, e) => t + e.qty * precoLinha(e), 0); $("#cartlink").innerHTML = `<span>Carrinho · ${ents.length} ${ents.length === 1 ? "artigo" : "artigos"}</span><span class="num">${eur(tot)} →</span>`; }
 }
 function render(){
   if (!S.me) return;
@@ -589,10 +590,19 @@ function habituals(){
 const stepOf = (pq, bu) => (Number(pq) === 1 && bu && bu !== "un") ? 0.5 : 1;
 // forma de encomenda escolhida pelo dono no back office (ex.: abacate à unidade): só muda a encomenda, sem preço na linha
 const formaOf = o => (o && (o.forma_encomenda || o.forma)) || "";
-const precoEmb = o => formaOf(o) ? 0 : (Number(o.pack_price) || 0);
+// formas permitidas pelo dono para este produto neste fornecedor ("" = como está: kg/L/un ou embalagem); a 1.ª é a de defeito
+const formasOf = o => (o && Array.isArray(o.formas) && o.formas.length) ? o.formas : [formaOf(o)];
+const formaSel = (key, o) => { const fs = formasOf(o), f = (S.cartForma || {})[key]; return fs.includes(f) ? f : fs[0]; };
+const formaLbl = (f, o, bu) => f || qLabel(o.pack_qty, bu) || bu || "un";
+const precoLinha = e => e.f ? 0 : (Number(e.o.pack_price) || 0);
+function stepperF(key, qty, o, bu){
+  const f = formaSel(key, o), fs = formasOf(o);
+  const sel = fs.length > 1 ? `<select class="fsel" data-k="${esc(key)}" aria-label="Encomendar em">${fs.map(x => `<option value="${esc(x)}" ${x === f ? "selected" : ""}>${esc(formaLbl(x, o, bu))}</option>`).join("")}</select>` : "";
+  return stepper(key, qty, f ? 1 : stepOf(o.pack_qty, bu), formaLbl(f, o, bu), sel);
+}
 const plural = (q, f) => (Math.abs(Number(q)) === 1 || f === "un" || !/[aeiou]$/i.test(f)) ? f : f + "s";
 const qLabel = (pq, bu) => Number(pq) !== 1 ? "emb." : (bu && bu !== "un" ? bu : "");
-function stepper(key, qty, step = 1, u = ""){ return `<div class="stepper"><button data-action="dec" data-k="${esc(key)}" data-st="${step}" aria-label="Menos">−</button><input class="qin" data-k="${esc(key)}" data-st="${step}" value="${num(qty,3)}" inputmode="decimal" aria-label="Quantidade${u ? " em " + esc(u) : ""}">${u ? `<span class="qu">${esc(u)}</span>` : ""}<button data-action="inc" data-k="${esc(key)}" data-st="${step}" aria-label="Mais">+</button></div>`; }
+function stepper(key, qty, step = 1, u = "", selHtml = ""){ return `<div class="stepper"><button data-action="dec" data-k="${esc(key)}" data-st="${step}" aria-label="Menos">−</button><input class="qin" data-k="${esc(key)}" data-st="${step}" value="${num(qty,3)}" inputmode="decimal" aria-label="Quantidade${u ? " em " + esc(u) : ""}">${selHtml || (u ? `<span class="qu">${esc(u)}</span>` : "")}<button data-action="inc" data-k="${esc(key)}" data-st="${step}" aria-label="Mais">+</button></div>`; }
 function prodCard(p){
   const offs = [...p.offers].filter(o => !S.sup || o.supplier_id === S.sup).sort((a,b) => a.unit_price - b.unit_price); const bu = p.unidade || "un";
   if (!offs.length) return `<div class="pitem"><div class="pname">${esc(p.nome)}</div><div class="psub">Sem preços.</div></div>`;
@@ -604,8 +614,8 @@ function prodCard(p){
       if (d >= 3) ch = ` <span class="tag up">↑${num(d,0)}%</span>`; else if (d <= -3) ch = ` <span class="tag down">↓${num(-d,0)}%</span>`; }
     const isPack = Number(o.pack_qty) !== 1;
     return `<div class="pl${S.pop === key ? " pop" : ""}">${main ? `<span class="pico" aria-hidden="true">${CAT_ICON[p.categoria] || "🛒"}</span>` : ""}<div class="pinfo">${main ? `<div class="pname">${esc(p.nome)}${inSite(p) ? "" : `<span class="stag">outro sítio</span>`}${isChefe() ? `<button class="edit" data-action="edit-prod" data-p="${p.id}" aria-label="Editar ${esc(p.nome)}">✎</button>` : ""}</div>` : ""}
-      ${main ? stockHint(p) : ""}<div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}${formaOf(o) ? ` · pede-se em <b>${esc(formaOf(o))}</b>` : ""}</div></div>
-      ${qty ? (formaOf(o) ? stepper(key, qty, 1, formaOf(o)) : stepper(key, qty, stepOf(o.pack_qty, bu), qLabel(o.pack_qty, bu))) : `<button class="addbtn" data-action="inc" data-k="${esc(key)}" aria-label="Adicionar ${esc(p.nome)} (${esc(s.nome || "")})">+</button>`}</div>`;
+      ${main ? stockHint(p) : ""}<div class="psub">${isPack ? `<b>${eur(o.pack_price)}</b> emb. ${esc(num(o.pack_qty, 3))} ${esc(bu)}` : `<b>${eur(o.unit_price)}/${esc(bu)}</b>`}${ch} · ${esc(shortSup(s.nome) || "Fornecedor")}${isPack ? ` · ${eur(o.unit_price)}/${esc(bu)}` : ""}${s.minimo ? " · mín. " + eur(s.minimo) : ""}${formasOf(o).length > 1 || formasOf(o)[0] ? ` · pede-se em <b>${esc(formasOf(o).map(f => formaLbl(f, o, bu)).join(" ou "))}</b>` : ""}</div></div>
+      ${qty ? stepperF(key, qty, o, bu) : `<button class="addbtn" data-action="inc" data-k="${esc(key)}" aria-label="Adicionar ${esc(p.nome)} (${esc(s.nome || "")})">+</button>`}</div>`;
   };
   const inCart = offs.some(o => S.cart[keyOf(o)] > 0);
   let h = `<div class="pitem${inCart ? " incart" : ""}">` + line(offs[0], true);
@@ -626,9 +636,9 @@ function viewCart(){
   const multi = new Set(ents.map(e => e.setor)).size > 1; let grand = 0;
   let h = `<h2 style="margin-bottom:10px">Carrinho</h2><div class="stack">`;
   for (const sid of Object.keys(by)) {
-    const es = by[sid]; const tot = es.reduce((t, e) => t + e.qty * precoEmb(e.o), 0); grand += tot;
+    const es = by[sid]; const tot = es.reduce((t, e) => t + e.qty * precoLinha(e), 0); grand += tot;
     h += `<section class="group"><header><h3>${esc(shortSup(supById(sid).nome))}</h3><span class="num" style="font-weight:700">${eur(tot)}</span></header><ul class="items">`
-      + es.map(e => `<li><div><b>${esc(e.p.nome)}${multi ? `<span class="stag">${esc(setorNome(e.setor))}</span>` : ""}</b><small>${formaOf(e.o) ? "em " + esc(formaOf(e.o)) + " · sem preço" : esc(unitInfo(e.o.pack_qty, e.p.unidade, e.o.pack_price))}</small></div>${formaOf(e.o) ? stepper(e.key, e.qty, 1, formaOf(e.o)) : stepper(e.key, e.qty, stepOf(e.o.pack_qty, e.p.unidade), qLabel(e.o.pack_qty, e.p.unidade))}<span class="num">${formaOf(e.o) ? "—" : eur(e.qty * e.o.pack_price)}</span></li>`).join("")
+      + es.map(e => `<li><div><b>${esc(e.p.nome)}${multi ? `<span class="stag">${esc(setorNome(e.setor))}</span>` : ""}</b><small>${e.f ? "em " + esc(e.f) + " · sem preço" : esc(unitInfo(e.o.pack_qty, e.p.unidade, e.o.pack_price))}</small></div>${stepperF(e.key, e.qty, e.o, e.p.unidade)}<span class="num">${e.f ? "—" : eur(e.qty * e.o.pack_price)}</span></li>`).join("")
       + `</ul>${cartMin(sid, tot) ? `<footer>${cartMin(sid, tot)}</footer>` : ""}</section>`;
   }
   return h + `<details class="more2" ${S.note ? "open" : ""}><summary>+ Nota para o fornecedor</summary><textarea id="cartnote" placeholder="Ex.: entregar antes das 11h" style="margin-top:8px">${esc(S.note)}</textarea></details>
@@ -1093,9 +1103,9 @@ document.addEventListener("click", async ev => {
     else if (a === "undo-cart") { if (S.undo) { S.cart = S.undo; S.undo = null; saveCart(); $("#toast").hidden = true; render(); } }
     else if (a === "submit-cart") {
       b.disabled = true;
-      const items = cartEntries().map(e => ({product_id:e.pid, supplier_id:e.sid, qty:e.qty, setor:e.setor}));
+      const items = cartEntries().map(e => ({product_id:e.pid, supplier_id:e.sid, qty:e.qty, setor:e.setor, forma:e.f}));
       const r = await rpc("compras_submit_order", {p_token:S.token, p_items:items, p_nota:S.note});
-      S.cart = {}; S.note = ""; saveCart(); await loadOrders();
+      S.cart = {}; S.cartForma = {}; S.note = ""; saveCart(); await loadOrders();
       if (!isChefe()) pushNotify("nova");
       toast((r.juntadas ? (r.juntadas === 1 ? "Produtos juntados à encomenda aberta do fornecedor. " : "Produtos juntados às encomendas abertas. ") : "")
         + (r.aprovadas ? "Envie-as em Pedidos." : "O chefe vai confirmar."));
@@ -1124,7 +1134,7 @@ document.addEventListener("click", async ev => {
     else if (a === "repeat") {
       const o = S.orders.find(x => x.id === b.dataset.o); let n = 0, miss = 0;
       (o.items || []).forEach(it => { const q = Number(it.qty) || 0; if (!(q > 0)) return; const p = it.product_id && prodById(it.product_id); const of = p && p.offers.find(x => x.supplier_id === o.supplier_id);
-        if (!of) { miss++; return; } const k = p.id + "|" + o.supplier_id + "|" + (it.setor || S.setor); S.cart[k] = S.cart[k] || q; n++; });
+        if (!of) { miss++; return; } const k = p.id + "|" + o.supplier_id + "|" + (it.setor || S.setor); if (!S.cart[k]) { S.cart[k] = q; S.cartForma[k] = it.forma || ""; } n++; });
       if (!n) { toast("Esses produtos já não estão disponíveis."); return; }
       saveCart(); location.hash = "#carrinho"; toast(n + (n === 1 ? " produto no carrinho" : " produtos no carrinho") + (miss ? " · " + miss + " já não disponíveis" : "") + ".");
     }
@@ -1238,6 +1248,7 @@ document.addEventListener("input", ev => {
 document.addEventListener("change", ev => {
   const t = ev.target;
   if (t.id === "files") { const arr = [...t.files].slice(0, 5); S.previews.forEach(u => u && URL.revokeObjectURL(u)); S.files = arr; S.previews = arr.map(f => f.type === "application/pdf" ? null : URL.createObjectURL(f)); S.readMsg = t.files.length > 5 ? "Só os primeiros 5 ficheiros serão lidos." : ""; render(); return; }
+  if (t.classList.contains("fsel")) { S.cartForma[t.dataset.k] = t.value; saveCart(); render(); return; }
   if (t.classList.contains("qin")) { const st = Number(t.dataset.st) || 1; let v = parseNum(t.value); if (isFinite(v) && st >= 1) v = Math.round(v); if (isFinite(v) && v > 0) { S.cart[t.dataset.k] = Math.round(v * 1000) / 1000; saveCart(); render(); } else { const prev = {...S.cart}; delete S.cart[t.dataset.k]; saveCart(); render(); undoToast("Produto retirado.", prev); } return; }
   if (t.classList.contains("cin")) { countSave(t); return; }
   if (t.id === "search") { const v = t.value.trim(); if (v.length >= 2) { const r = [v, ...ls.get("cf_recent", []).filter(x => x !== v)].slice(0, 6); ls.set("cf_recent", r); fillRecent(); } return; }

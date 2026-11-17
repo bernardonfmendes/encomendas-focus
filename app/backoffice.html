@@ -100,6 +100,12 @@ aside.drawer h3{margin:6px 0 8px;font-size:16px}
 .chart svg{width:100%;height:auto;display:block}
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12.5px;color:var(--muted);margin-top:6px}
 .legend i{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.fdrop{position:relative}
+.fdrop summary{cursor:pointer;list-style:none;border:1px solid var(--line);border-radius:9px;padding:6px 26px 6px 10px;min-height:34px;background:var(--surface);font-weight:600;position:relative;white-space:nowrap}
+.fdrop summary::-webkit-details-marker{display:none}
+.fdrop summary::after{content:"▾";position:absolute;right:9px;color:var(--muted)}
+.fdrop .fmenu{position:absolute;z-index:3;margin-top:4px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px 10px;box-shadow:0 8px 24px rgba(0,0,0,.12);min-width:200px}
+.fdrop .chk{min-height:32px}
 .toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;z-index:30;font-size:14px;max-width:90vw}
 @media (max-width:700px){
   .tbl{max-height:none}
@@ -241,7 +247,7 @@ function fornecedores(){ const s = new Map(); B.prods.forEach(p => p.ofertas.for
 function desenharProdutos(){
   const forn = fornecedores();
   const cats = [...new Set(B.prods.map(p => p.categoria || "Outros"))].sort((a, b) => CATS.indexOf(a) - CATS.indexOf(b));
-  $("#main").innerHTML = `<p class="lead">Aqui só se mudam nomes. <b>Nome do produto</b>: o que os colaboradores veem quando encomendam. <b>Nome na encomenda</b>: o que vai na mensagem ao fornecedor (se ficar vazio, vai a descrição da fatura com a embalagem). <b>Forma de encomenda</b>: como se pede a esse fornecedor (ex.: abacate à unidade); as faturas e o stock continuam na unidade do produto e essas linhas ficam sem preço na encomenda. Escreva e carregue Enter; Esc desfaz.</p>
+  $("#main").innerHTML = `<p class="lead">Aqui só se mudam nomes. <b>Nome do produto</b>: o que os colaboradores veem quando encomendam. <b>Nome na encomenda</b>: o que vai na mensagem ao fornecedor (se ficar vazio, vai a descrição da fatura com a embalagem). <b>Forma de encomenda</b>: em que formas se pode pedir a esse fornecedor (ex.: banana em kg ou un); quem encomenda escolhe uma. A primeira é a de defeito. As faturas e o stock continuam na unidade do produto, e as linhas pedidas noutra forma ficam sem preço na encomenda. Escreva e carregue Enter; Esc desfaz.</p>
     <div class="toolbar">
       <label class="f grow">Procurar<input id="q" type="search" value="${esc(B.q)}" placeholder="Nome, descrição da fatura ou fornecedor" autocomplete="off"></label>
       <label class="f">Fornecedor<select id="fForn"><option value="">Todos</option>${forn.map(([id, n]) => `<option value="${id}" ${B.fForn === id ? "selected" : ""}>${esc(n)}</option>`).join("")}<option value="-" ${B.fForn === "-" ? "selected" : ""}>Sem fornecedor</option></select></label>
@@ -286,36 +292,45 @@ function linhasProdutos(){
 }
 // forma de encomenda: "como está" (unidade do produto ou embalagem), as formas da lista, ou uma nova
 const plural = (q, f) => (Math.abs(Number(q)) === 1 || f === "un" || !/[aeiou]$/i.test(f)) ? f : f + "s";
-function selForma(o, p){
-  const pq = Number(o.pack_qty) || 1, base = pq !== 1 ? "emb. de " + num(pq, 3) + " " + p.unidade : p.unidade;
-  const formas = [...new Set(B.formas.concat(o.forma_encomenda ? [o.forma_encomenda] : []))];
-  return `<select class="forma" data-p="${p.id}" data-s="${o.supplier_id}" data-orig="${esc(o.forma_encomenda)}" aria-label="Forma de encomenda a ${esc(o.fornecedor)}">
-    <option value="" ${!o.forma_encomenda ? "selected" : ""}>Como está (${esc(base)})</option>
-    ${formas.map(f => `<option value="${esc(f)}" ${o.forma_encomenda === f ? "selected" : ""}>${esc(f)}</option>`).join("")}
-    <option value="__nova">+ Nova forma…</option></select>`;
+function baseForma(o, p){ const pq = Number(o.pack_qty) || 1; return pq !== 1 ? "emb. de " + num(pq, 3) + " " + p.unidade : p.unidade; }
+const formasDe = o => (o.formas && o.formas.length) ? o.formas : [""];
+function resumoFormas(o, p){ return formasDe(o).map(f => f || baseForma(o, p)).join(" ou "); }
+function selForma(o, p, aberto){
+  const fs = formasDe(o), base = baseForma(o, p);
+  const lista = [""].concat([...new Set(B.formas.concat(fs.filter(Boolean)))]);
+  return `<details class="fdrop" ${aberto ? "open" : ""}><summary title="Formas em que se pode encomendar">${esc(resumoFormas(o, p))}</summary><div class="fmenu">
+    ${lista.map(f => `<label class="chk"><input type="checkbox" class="fchk" data-p="${p.id}" data-s="${o.supplier_id}" value="${esc(f)}" ${fs.includes(f) ? "checked" : ""}> ${esc(f || "como está (" + base + ")")}</label>`).join("")}
+    <button class="link" data-action="nova-forma" data-p="${p.id}" data-s="${o.supplier_id}">+ Nova forma…</button></div></details>`;
 }
-async function guardarForma(t){
-  let v = t.value;
-  const st = t.nextElementSibling;
-  if (v === "__nova") {
-    v = (prompt("Nome da nova forma de encomenda (ex.: bandeja, grade, pacote):") || "").trim().toLowerCase().replace(/\s+/g, " ");
-    if (!v) { t.value = t.dataset.orig; return; }
-  }
+async function guardarFormas(p, o, formas, td, aberto){
+  const st = td.querySelector(".st");
   st.className = "st"; st.textContent = "A guardar…";
   try {
-    const r = await rpc("compras_bo_forma_encomenda", {p_token:B.token, p_product:t.dataset.p, p_supplier:t.dataset.s, p_forma:v});
-    const p = B.prods.find(x => x.id === t.dataset.p), o = p.ofertas.find(x => x.supplier_id === t.dataset.s);
-    o.forma_encomenda = r.forma_encomenda; t.dataset.orig = r.forma_encomenda;
-    if (r.forma_encomenda && !B.formas.includes(r.forma_encomenda)) { B.formas.push(r.forma_encomenda); }
-    const td = t.parentElement; td.innerHTML = selForma(o, p) + `<span class="st ok">✓ Guardado</span>`;
+    const r = await rpc("compras_bo_formas_oferta", {p_token:B.token, p_product:p.id, p_supplier:o.supplier_id, p_formas:formas});
+    o.formas = r.formas;
+    formas.filter(Boolean).forEach(f => { if (!B.formas.includes(f)) B.formas.push(f); });
+    td.innerHTML = selForma(o, p, aberto) + `<span class="st ok">✓ Guardado</span>`;
     const pv = td.previousElementSibling.querySelector(".prev"); if (pv) pv.textContent = previsao(o, p);
     setTimeout(() => { const s2 = td.querySelector(".st"); if (s2 && s2.textContent === "✓ Guardado") s2.textContent = ""; }, 2500);
-  } catch(e){ st.className = "st err"; st.textContent = errMsg(e); t.value = t.dataset.orig; }
+  } catch(e){ td.innerHTML = selForma(o, p, aberto) + `<span class="st err">${esc(errMsg(e))}</span>`; }
+}
+function mudouForma(t){
+  const p = B.prods.find(x => x.id === t.dataset.p), o = p.ofertas.find(x => x.supplier_id === t.dataset.s), td = t.closest("td");
+  const marcadas = [...td.querySelectorAll(".fchk")].filter(x => x.checked).map(x => x.value);
+  if (!marcadas.length) { t.checked = true; const st = td.querySelector(".st"); st.className = "st err"; st.textContent = "Tem de ficar pelo menos uma forma."; return; }
+  guardarFormas(p, o, marcadas, td, true);
+}
+function novaForma(el){
+  const v = (prompt("Nome da nova forma de encomenda (ex.: bandeja, grade, pacote):") || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!v) return;
+  const p = B.prods.find(x => x.id === el.dataset.p), o = p.ofertas.find(x => x.supplier_id === el.dataset.s), td = el.closest("td");
+  const fs = formasDe(o); guardarFormas(p, o, fs.includes(v) ? fs : fs.concat([v]), td, true);
 }
 // o que vai na mensagem ao fornecedor (igual à app: com forma, "2 caixas Nome"; com nome na encomenda vai só o nome)
 function previsao(o, p){
+  const fs = formasDe(o);
+  if (fs.length > 1 || fs[0]) return "Na mensagem: " + fs.map(f => f ? "2 " + plural(2, f) + " " + (o.nome_encomenda || o.alias) : previsao({...o, formas:[""]}, p).replace("Na mensagem: ", "")).join(" ou ");
   const pq = Number(o.pack_qty) || 1, bu = p.unidade || "un";
-  if (o.forma_encomenda) return "Na mensagem: 2 " + plural(2, o.forma_encomenda) + " " + (o.nome_encomenda || o.alias);
   const qs = (pq === 1 && bu !== "un") ? "2 " + bu : "2 ×";
   if (o.nome_encomenda) return "Na mensagem: " + qs + " " + o.nome_encomenda;
   return "Na mensagem: " + qs + " " + o.alias + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (o.codigo ? " (ref. " + o.codigo + ")" : "");
@@ -326,7 +341,7 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("change", e => {
   const t = e.target;
-  if (t.classList && t.classList.contains("forma")) { guardarForma(t); return; }
+  if (t.classList && t.classList.contains("fchk")) { mudouForma(t); return; }
   if (t.id === "fForn") { B.fForn = t.value; linhasProdutos(); }
   else if (t.id === "fCat") { B.fCat = t.value; linhasProdutos(); }
   else if (t.id === "fEnc") { B.fEnc = t.value; linhasProdutos(); }
@@ -572,12 +587,14 @@ function fecharDetalhe(){
 
 // ---------- cliques ----------
 document.addEventListener("click", e => {
+  document.querySelectorAll("details.fdrop[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; });
   const el = e.target.closest("[data-action]"); if (!el) return;
   const a = el.dataset.action;
   if (a === "logout") sair(false);
   else if (a === "detalhe") abrirDetalhe(el.dataset.p);
   else if (a === "fechar") fecharDetalhe();
   else if (a === "exportar") exportar();
+  else if (a === "nova-forma") novaForma(el);
   else if (a === "ordenar") { const k = el.dataset.k, so = B.vista === "resumo" ? "sortR" : "sort"; B[so] = {k, dir:B[so].k === k ? -B[so].dir : -1}; desenharPrecos(); }
 });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches && e.target.matches("tr.click")) abrirDetalhe(e.target.dataset.p); });
