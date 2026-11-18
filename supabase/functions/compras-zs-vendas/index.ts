@@ -2,6 +2,8 @@
 // Entra com o utilizador guardado nos segredos ZS_NIF / ZS_USER / ZS_PASS (nunca no repositório) e só lê:
 // lista os documentos de venda de cada dia (FT, FA, FS e NC), abre cada um para ter as linhas, soma por dia e artigo
 // (anulados fora, NC a subtrair) e grava com compras_zs_auto_import, que substitui os dias enviados.
+// Por dia e artigo guarda também o valor sem IVA (soma de `valor`), o preço de tabela com IVA (`precovenda` mais vendido
+// nesse dia, 0 nas linhas do all you can eat) e a taxa de IVA: servem para o CMV no back office.
 // As linhas de composição interna do ZSbms (tipo 3) ficam de fora. Os cabeçalhos de menu entram com a quantidade
 // vendida: é em compras_zs_items que se diz se o menu se ignora (componentes em linhas próprias) ou tem receita.
 // Só aceita pedidos com o cabeçalho x-zs-key igual à chave guardada em compras_zs_cfg (usada pela tarefa agendada).
@@ -146,7 +148,8 @@ Deno.serve(async (req: Request) => {
 
     const s = new Sessao();
     await s.entrar();
-    const soma = new Map<string, { dia: string; codigo: number; descricao: string; qtd: number; total: number }>();
+    type Soma = { dia: string; codigo: number; descricao: string; qtd: number; total: number; valor: number; iva: number | null; precos: Map<number, number> };
+    const soma = new Map<string, Soma>();
     const porTipo: Record<string, number> = {};
     let documentos = 0, anulados = 0;
     const brutas: unknown[] = [];  // só no ensaio: linhas tal como vêm, para os códigos pedidos
@@ -175,16 +178,27 @@ Deno.serve(async (req: Request) => {
             }
             if (tipo === 3) continue;  // composição interna do ZSbms (ficha técnica do artigo vendido): não é uma venda
             const k = dia + "|" + codigo;
-            const a = soma.get(k) || { dia, codigo, descricao: "", qtd: 0, total: 0 };
-            a.qtd += sinal * (Number(l.qtd) || 0);
-            a.total += sinal * (Number(l.total) || 0);
+            const a = soma.get(k) || { dia, codigo, descricao: "", qtd: 0, total: 0, valor: 0, iva: null, precos: new Map() };
+            const q = Number(l.qtd) || 0, tot = Number(l.total) || 0, iva = Number(l.iva);
+            a.qtd += sinal * q;
+            a.total += sinal * tot;
+            // valor = total sem IVA; se faltar, tira-se o IVA do total
+            a.valor += sinal * (l.valor != null && Number.isFinite(Number(l.valor)) ? Number(l.valor) : (Number.isFinite(iva) ? tot / (1 + iva / 100) : tot));
+            if (sinal > 0 && Number.isFinite(iva) && (a.iva == null || tot > 0)) a.iva = iva;
+            const pv = Number(l.precovenda);
+            if (sinal > 0 && Number.isFinite(pv)) a.precos.set(pv, (a.precos.get(pv) || 0) + q);
             if (l.descricao) a.descricao = String(l.descricao);
             soma.set(k, a);
           }
         });
       }
     }
-    const linhas = [...soma.values()].map((a) => ({ ...a, qtd: Math.round(a.qtd * 1e4) / 1e4, total: Math.round(a.total * 1e4) / 1e4 }));
+    const r4 = (n: number) => Math.round(n * 1e4) / 1e4;
+    const linhas = [...soma.values()].map(({ precos, ...a }) => {
+      let pvp: number | null = null, mq = -Infinity;  // preço de tabela mais vendido nesse dia
+      for (const [p, q] of precos) if (q > mq || (q === mq && p > (pvp ?? -1))) { pvp = p; mq = q; }
+      return { ...a, qtd: r4(a.qtd), total: r4(a.total), valor: r4(a.valor), pvp };
+    });
     const info = { ok: true, dias, documentos, anulados, por_tipo: porTipo, artigos: linhas.length };
     if (ensaio) return json({ ...info, ensaio: true, linhas, brutas, formas });
     const gravado = await rpc("compras_zs_auto_import", { p_rows: linhas, p_info: info });

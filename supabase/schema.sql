@@ -2841,3 +2841,177 @@ begin
     'restaurante', (select restaurante from public.compras_settings where id = 1),
     'dono', u.id = (select dono_id from public.compras_settings where id = 1));
 end $function$;
+
+-- ===================== Vendas: valor sem IVA, preço de tabela e IVA (18/11) =====================
+alter table public.compras_sales
+  add column if not exists valor numeric,   -- total sem IVA (ZSbms `valor`)
+  add column if not exists pvp numeric,     -- preço de tabela com IVA mais vendido nesse dia (ZSbms `precovenda`; 0 no all you can eat)
+  add column if not exists iva numeric;     -- taxa de IVA (%)
+
+create or replace function public.compras__import_sales(p_rows jsonb)
+ returns jsonb
+ language plpgsql
+ security definer
+ set search_path to 'public', 'extensions'
+as $function$
+declare n int; nd int;
+begin
+  delete from public.compras_sales where dia in (select distinct (x->>'dia')::date from jsonb_array_elements(coalesce(p_rows,'[]')) x);
+  get diagnostics nd = row_count;
+  insert into public.compras_sales (dia, codigo, descricao, qtd, total, valor, pvp, iva)
+  select (x->>'dia')::date, (x->>'codigo')::int, max(coalesce(x->>'descricao','')), sum(coalesce((x->>'qtd')::numeric,0)), sum(coalesce((x->>'total')::numeric,0)),
+         sum(nullif(x->>'valor','')::numeric), max(nullif(x->>'pvp','')::numeric), max(nullif(x->>'iva','')::numeric)
+    from jsonb_array_elements(coalesce(p_rows,'[]')) x
+   where nullif(x->>'dia','') is not null and nullif(x->>'codigo','') is not null
+   group by 1, 2;
+  get diagnostics n = row_count;
+  insert into public.compras_zs_items (codigo, descricao)
+  select distinct on ((x->>'codigo')::int) (x->>'codigo')::int, coalesce(x->>'descricao','')
+    from jsonb_array_elements(coalesce(p_rows,'[]')) x where nullif(x->>'codigo','') is not null
+  on conflict (codigo) do update set descricao = excluded.descricao;
+  perform public.compras__refresh_media_sushi();
+  return jsonb_build_object('linhas', n, 'substituidas', nd);
+end $function$;
+
+-- ===================== CMV por artigo, por prato e global (18/11) =====================
+-- CMV (custo da mercadoria vendida) por artigo do ZSbms, por prato e global.
+-- Custo: o da receita no Guará (extra.custo_guara); se o Guará não tiver custo (ou der 0 ou negativo), o das faturas
+-- (receita × últimos preços). Artigos ligados a um produto: último preço do produto × fator.
+-- Preço de venda: o preço de tabela do ZSbms (precovenda) mais vendido no período, só nas linhas pagas; sem IVA com a
+-- taxa da própria linha. CMV = custo ÷ preço de venda sem IVA. Linhas do all you can eat (a 0 €) não têm preço.
+create or replace function public.compras__vendas_artigos(p_de date, p_ate date)
+returns table(codigo int, descricao text, tipo text, recipe_guara_id text, receita text, categoria text, product_id uuid, produto text,
+  fator numeric, custo numeric, custo_fonte text, custo_guara numeric, custo_faturas numeric, pvp numeric, iva numeric, pvp_sem_iva numeric,
+  cmv_pct numeric, qtd numeric, qtd_paga numeric, vendas numeric, vendas_sem_iva numeric, custo_total numeric, ayce boolean)
+language sql stable security definer set search_path = public as $$
+  with s as (
+    select s.codigo, s.qtd, s.total, s.pvp, s.iva,
+           coalesce(s.valor, s.total / (1 + coalesce(s.iva, 13) / 100)) valor
+      from public.compras_sales s where s.dia between p_de and p_ate),
+  ag as (select s.codigo, sum(s.qtd) qtd, coalesce(sum(s.qtd) filter (where s.total > 0), 0) qtd_paga,
+                sum(s.total) vendas, sum(s.valor) vendas_sem_iva from s group by 1),
+  pv as (select distinct on (x.codigo) x.codigo, x.pvp, x.iva from (
+           select s.codigo, coalesce(nullif(s.pvp, 0), round(s.total / nullif(s.qtd, 0), 2)) pvp,
+                  coalesce(case when s.iva > 0 then s.iva end, round((s.total / nullif(s.valor, 0) - 1) * 100), 13) iva, sum(s.qtd) q
+             from s where s.total > 0 and s.qtd > 0 group by 1, 2, 3) x
+         order by x.codigo, x.q desc, x.pvp desc),
+  use as (select * from public.compras__recipe_usage()),
+  preco as (select distinct on (h.product_id) h.product_id, h.unit_price from public.compras_price_history h order by h.product_id, h.data desc, h.id desc),
+  capp as (select u.root, sum(u.qty * coalesce(p.unit_price, 0)) c from use u left join preco p on p.product_id = u.product_id group by 1),
+  b as (
+    select a.codigo, z.descricao,
+           case when z.ignorar then 'menu' when z.recipe_guara_id is not null then 'receita' when z.product_id is not null then 'produto' else 'sem_ligacao' end tipo,
+           z.recipe_guara_id, r.nome receita, coalesce(nullif(r.categoria, ''), pr.categoria) categoria, z.product_id, pr.nome produto, z.fator,
+           case when not z.ignorar and z.recipe_guara_id is not null then nullif((r.extra->>'custo_guara')::numeric, 0) * z.fator end cg,
+           case when z.ignorar then null when z.recipe_guara_id is not null then nullif(ca.c, 0) * z.fator
+                when z.product_id is not null then pc.unit_price * z.fator end cf,
+           pv.pvp, pv.iva, a.qtd, a.qtd_paga, a.vendas, a.vendas_sem_iva,
+           coalesce(z.descricao like '@%' or (a.qtd > 0 and a.qtd_paga = 0), false) ayce
+      from ag a
+      left join public.compras_zs_items z on z.codigo = a.codigo
+      left join public.compras_recipes r on r.guara_id = z.recipe_guara_id
+      left join public.compras_products pr on pr.id = z.product_id
+      left join capp ca on ca.root = z.recipe_guara_id
+      left join preco pc on pc.product_id = z.product_id
+      left join pv on pv.codigo = a.codigo)
+  select b.codigo, coalesce(b.descricao, ''), coalesce(b.tipo, 'sem_ligacao'), b.recipe_guara_id, b.receita, b.categoria, b.product_id, b.produto, b.fator,
+         round(c.custo, 4), c.fonte, round(b.cg, 4), round(b.cf, 4),
+         case when not b.ayce then b.pvp end, case when not b.ayce then b.iva end,
+         case when not b.ayce then round(b.pvp / (1 + b.iva / 100), 4) end,
+         case when not b.ayce and b.pvp > 0 and c.custo is not null then round(c.custo / (b.pvp / (1 + b.iva / 100)) * 100, 1) end,
+         b.qtd, b.qtd_paga, round(b.vendas, 2), round(b.vendas_sem_iva, 2), round(c.custo * b.qtd, 2), b.ayce
+    from b, lateral (select case when b.cg > 0 then b.cg when b.cf > 0 then b.cf end custo,
+                            case when b.cg > 0 then 'guara' when b.cf > 0 then 'faturas' end fonte) c
+$$;
+revoke all on function public.compras__vendas_artigos(date, date) from public, anon, authenticated;
+
+-- Por prato (receita do Guará): custo da receita, preço de venda por receita (média dos artigos pagos que a usam,
+-- ponderada pelas quantidades) e CMV. Só all you can eat → sem preço.
+create or replace function public.compras__pratos_cmv(p_de date, p_ate date)
+returns table(guara_id text, custo numeric, custo_fonte text, custo_guara numeric, custo_faturas numeric, pvp numeric, pvp_sem_iva numeric,
+  iva numeric, cmv_pct numeric, vendidos numeric, so_ayce boolean)
+language sql stable security definer set search_path = public as $$
+  with a as (select * from public.compras__vendas_artigos(p_de, p_ate) v where v.tipo = 'receita'),
+  r as (select a.recipe_guara_id g,
+               sum(a.qtd * a.fator) vendidos,
+               sum(a.pvp * a.qtd_paga) filter (where a.pvp > 0) / nullif(sum(a.qtd_paga * a.fator) filter (where a.pvp > 0), 0) pvp,
+               sum(a.pvp_sem_iva * a.qtd_paga) filter (where a.pvp > 0) / nullif(sum(a.qtd_paga * a.fator) filter (where a.pvp > 0), 0) pvp_sem_iva,
+               bool_and(a.ayce) so_ayce
+          from a group by 1),
+  use as (select * from public.compras__recipe_usage()),
+  preco as (select distinct on (h.product_id) h.product_id, h.unit_price from public.compras_price_history h order by h.product_id, h.data desc, h.id desc),
+  capp as (select u.root, sum(u.qty * coalesce(p.unit_price, 0)) c from use u left join preco p on p.product_id = u.product_id group by 1)
+  select r.g, round(c.custo, 4), c.fonte, round(nullif((rc.extra->>'custo_guara')::numeric, 0), 4), round(nullif(ca.c, 0), 4),
+         round(r.pvp, 2), round(r.pvp_sem_iva, 4), round((r.pvp / nullif(r.pvp_sem_iva, 0) - 1) * 100),
+         case when r.pvp_sem_iva > 0 and c.custo is not null then round(c.custo / r.pvp_sem_iva * 100, 1) end,
+         r.vendidos, r.so_ayce
+    from r join public.compras_recipes rc on rc.guara_id = r.g left join capp ca on ca.root = r.g,
+    lateral (select case when (rc.extra->>'custo_guara')::numeric > 0 then (rc.extra->>'custo_guara')::numeric when ca.c > 0 then ca.c end custo,
+                    case when (rc.extra->>'custo_guara')::numeric > 0 then 'guara' when ca.c > 0 then 'faturas' end fonte) c
+$$;
+revoke all on function public.compras__pratos_cmv(date, date) from public, anon, authenticated;
+
+-- Back office: artigos vendidos no período com CMV e totais (CMV global e do all you can eat)
+create or replace function public.compras_bo_pratos(p_token text, p_de date default null, p_ate date default null)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_de date := coalesce(p_de, current_date - 29); v_ate date := coalesce(p_ate, current_date); r jsonb;
+begin
+  perform public.compras__dono(p_token);
+  if v_ate < v_de then raise exception 'periodo_invalido'; end if;
+  with a as (select * from public.compras__vendas_artigos(v_de, v_ate))
+  select jsonb_build_object(
+    'de', v_de, 'ate', v_ate,
+    'dias', (select count(distinct s.dia) from public.compras_sales s where s.dia between v_de and v_ate),
+    'vendas_sem_iva', (select round(sum(vendas_sem_iva), 2) from a),
+    'vendas', (select round(sum(vendas), 2) from a),
+    'custo', (select round(sum(custo_total), 2) from a),
+    'sem_custo_vendas', (select round(sum(vendas_sem_iva), 2) from a where tipo <> 'menu' and custo is null and not ayce),
+    'sem_custo_artigos', (select count(*) from a where tipo <> 'menu' and custo is null and qtd > 0),
+    'ayce_vendas', (select round(sum(vendas_sem_iva), 2) from a where tipo = 'menu' and descricao ilike '%all you can eat%'),
+    'ayce_custo', (select round(sum(custo_total), 2) from a where descricao like '@%'),
+    'artigos', coalesce((select jsonb_agg(to_jsonb(a) order by a.vendas_sem_iva desc nulls last, a.qtd desc) from a where a.qtd <> 0), '[]'))
+  into r;
+  return r;
+end $$;
+revoke all on function public.compras_bo_pratos(text, date, date) from public;
+grant execute on function public.compras_bo_pratos(text, date, date) to anon, authenticated;
+
+-- Detalhe do produto: os pratos afetados levam custo do Guará, preço de venda do ZSbms e CMV (últimos 30 dias)
+create or replace function public.compras_bo_produto(p_token text, p_id uuid)
+ returns jsonb
+ language plpgsql
+ security definer
+ set search_path to 'public', 'extensions'
+as $function$
+declare r jsonb;
+begin
+  perform public.compras__dono(p_token);
+  with est as (select * from public.compras__precos_estimados() e where e.product_id = p_id),
+  hist as (select h.invoice_id, h.supplier_id, h.data, avg(h.unit_price) u, min(h.id) id from public.compras_price_history h where h.product_id = p_id group by 1, 2, 3),
+  ult as (select * from hist order by data desc, id desc limit 1),
+  ant as (select h.* from hist h, ult where h.supplier_id = ult.supplier_id and h.data < ult.data order by h.data desc, h.id desc limit 1),
+  use as (select * from public.compras__recipe_usage()),
+  preco as (select distinct on (product_id) product_id, unit_price from public.compras_price_history order by product_id, data desc, id desc),
+  cmv as (select * from public.compras__pratos_cmv(current_date - 29, current_date)),
+  mapeadas as (select distinct recipe_guara_id g from public.compras_zs_items where recipe_guara_id is not null and not ignorar),
+  pratos as (select r.guara_id, r.nome, u.qty qtd_produto,
+               (select sum(u2.qty * coalesce(pc.unit_price, 0)) from use u2 left join preco pc on pc.product_id = u2.product_id where u2.root = r.guara_id) custo_faturas,
+               (select count(*) from use u2 left join preco pc on pc.product_id = u2.product_id where u2.root = r.guara_id and pc.unit_price is null) sem_preco,
+               c.custo, c.custo_fonte, c.custo_guara, c.pvp, c.pvp_sem_iva, c.iva, c.cmv_pct, coalesce(c.so_ayce, false) so_ayce,
+               coalesce(c.vendidos, 0) vendidos_30d
+               from use u join public.compras_recipes r on r.guara_id = u.root join mapeadas m on m.g = r.guara_id left join cmv c on c.guara_id = r.guara_id
+              where u.product_id = p_id)
+  select jsonb_build_object(
+    'produto', (select jsonb_build_object('id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade) from public.compras_products p where p.id = p_id),
+    'preco_atual', (select u from ult), 'preco_anterior', (select u from ant), 'data_atual', (select data from ult), 'data_anterior', (select data from ant),
+    'historico', coalesce((select jsonb_agg(jsonb_build_object('data', h.data, 'fornecedor', s.nome, 'supplier_id', h.supplier_id, 'numero', i.numero,
+        'preco', round(h.u, 4), 'qtd', (select sum(pl.qty) from public.compras_purchase_lines pl where pl.invoice_id = h.invoice_id and pl.product_id = p_id),
+        'estimado', exists (select 1 from est where est.invoice_id = h.invoice_id)) order by h.data, h.id)
+      from hist h join public.compras_suppliers s on s.id = h.supplier_id join public.compras_invoices i on i.id = h.invoice_id), '[]'),
+    'pratos', coalesce((select jsonb_agg(jsonb_build_object('guara_id', guara_id, 'nome', nome, 'qtd_produto', round(qtd_produto, 5),
+        'custo', round(custo, 4), 'custo_fonte', custo_fonte, 'custo_guara', custo_guara, 'custo_faturas', round(custo_faturas, 4), 'sem_preco', sem_preco,
+        'pvp', pvp, 'pvp_sem_iva', pvp_sem_iva, 'iva', iva, 'cmv_pct', cmv_pct, 'so_ayce', so_ayce,
+        'vendidos_30d', vendidos_30d) order by vendidos_30d desc, nome) from pratos), '[]'))
+  into r;
+  return r;
+end $function$;

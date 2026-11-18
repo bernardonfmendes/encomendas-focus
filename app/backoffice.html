@@ -145,6 +145,7 @@ aside.drawer h3{margin:6px 0 8px;font-size:16px}
       <nav class="tabs" aria-label="Secções">
         <a href="#produtos" data-tab="produtos">Produtos</a>
         <a href="#precos" data-tab="precos">Preços</a>
+        <a href="#cmv" data-tab="cmv">CMV</a>
       </nav>
     </div>
   </header>
@@ -175,6 +176,7 @@ const eur = (n, d = 2) => (Number(n) || 0).toLocaleString("pt-PT", {style:"curre
 const eurU = n => { n = Number(n) || 0; return eur(n, Math.abs(n) < 1 ? 3 : 2); };
 const num = (n, d = 2) => (Number(n) || 0).toLocaleString("pt-PT", {maximumFractionDigits:d});
 const pct = n => (n > 0 ? "+" : "") + (Number(n) || 0).toLocaleString("pt-PT", {minimumFractionDigits:1, maximumFractionDigits:1}) + "%";
+const pctS = n => (Number(n) || 0).toLocaleString("pt-PT", {minimumFractionDigits:1, maximumFractionDigits:1}) + "%";
 const norm = s => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
 const iso = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 const fmtDate = s => s && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(8, 10) + "/" + s.slice(5, 7) + "/" + s.slice(2, 4) : "";
@@ -195,7 +197,8 @@ async function rpc(fn, args){
 const B = {
   token:null, daApp:false, me:null, tab:"produtos",
   prods:[], formas:[], q:"", fForn:"", fCat:"", fEnc:"",
-  ev:[], res:[], vista:"resumo", per:"30", de:"", ate:"", eForn:"", eCat:"", eTipo:"", eMin:0, eEst:true, sort:{k:"data", dir:-1}, sortR:{k:"mes", dir:-1}, carregado:""
+  ev:[], res:[], vista:"resumo", per:"30", de:"", ate:"", eForn:"", eCat:"", eTipo:"", eMin:0, eEst:true, sort:{k:"data", dir:-1}, sortR:{k:"mes", dir:-1}, carregado:"",
+  pr:null, pq:"", pCat:"", pTipo:"", pSort:{k:"vendas", dir:-1}
 };
 
 // ---------- sessão ----------
@@ -239,9 +242,9 @@ function mostrar(){
   irPara((location.hash || "#produtos").slice(1));
 }
 function irPara(tab){
-  B.tab = tab === "precos" ? "precos" : "produtos";
+  B.tab = ["precos", "cmv"].includes(tab) ? tab : "produtos";
   document.querySelectorAll("nav.tabs a").forEach(a => a.setAttribute("aria-current", a.dataset.tab === B.tab ? "page" : "false"));
-  if (B.tab === "produtos") carregarProdutos(); else carregarPrecos();
+  if (B.tab === "produtos") carregarProdutos(); else if (B.tab === "cmv") carregarPratos(); else carregarPrecos();
 }
 window.addEventListener("hashchange", () => { if (B.token) irPara(location.hash.slice(1)); });
 
@@ -348,6 +351,7 @@ function previsao(o, p){
 let qT;
 document.addEventListener("input", e => {
   if (e.target.id === "q") { B.q = e.target.value; clearTimeout(qT); qT = setTimeout(linhasProdutos, 150); }
+  else if (e.target.id === "pq") { B.pq = e.target.value; clearTimeout(qT); qT = setTimeout(linhasPratos, 150); }
 });
 document.addEventListener("change", e => {
   const t = e.target;
@@ -355,8 +359,9 @@ document.addEventListener("change", e => {
   if (t.id === "fForn") { B.fForn = t.value; linhasProdutos(); }
   else if (t.id === "fCat") { B.fCat = t.value; linhasProdutos(); }
   else if (t.id === "fEnc") { B.fEnc = t.value; linhasProdutos(); }
-  else if (t.id === "per") { B.per = t.value; if (B.per !== "pers") carregarPrecos(); else desenharPrecos(); }
-  else if (t.id === "de" || t.id === "ate") { B[t.id] = t.value; if (B.de && B.ate && B.de <= B.ate) carregarPrecos(); }
+  else if (t.id === "per") { B.per = t.value; if (B.per !== "pers") (B.tab === "cmv" ? carregarPratos : carregarPrecos)(); else (B.tab === "cmv" ? desenharPratos : desenharPrecos)(); }
+  else if (t.id === "de" || t.id === "ate") { B[t.id] = t.value; if (B.de && B.ate && B.de <= B.ate) (B.tab === "cmv" ? carregarPratos : carregarPrecos)(); }
+  else if (t.id === "pCat" || t.id === "pTipo") { B[t.id] = t.value; linhasPratos(); }
   else if (["eForn", "eCat", "eTipo", "eMin"].includes(t.id)) { B[t.id] = t.id === "eMin" ? Number(t.value) : t.value; linhasPrecos(); }
   else if (t.id === "eEst") { B.eEst = t.checked; linhasPrecos(); }
   else if (t.id === "vista") { B.vista = t.value; desenharPrecos(); }
@@ -557,14 +562,88 @@ async function abrirDetalhe(pid){
 }
 function pratosHtml(pratos, u, dP, temAnt){
   if (!pratos.length) return `<p class="muted">Nenhum prato vendido usa este produto (ou as receitas ainda não estão ligadas às vendas).</p>`;
-  return `<p class="lead" style="font-size:13px">Custo da dose com os últimos preços de todos os ingredientes. “Antes” é o custo com o preço anterior deste produto.</p>
-    <div class="tbl" style="max-height:none"><table><thead><tr><th>Prato</th><th class="num">Usa</th><th class="num">Custo da dose</th><th class="num">Antes</th><th class="num">PVP</th><th class="num">Custo / PVP</th><th class="num">Vendidos (30 dias)</th></tr></thead><tbody>
-    ${pratos.map(x => { const antes = temAnt ? x.custo - x.qtd_produto * dP : null, cp = x.pvp ? x.custo / x.pvp * 100 : null;
-      return `<tr><td>${esc(x.nome)}${x.sem_preco ? ` <span class="tag" title="Há ingredientes sem preço: o custo real é maior">${x.sem_preco} sem preço</span>` : ""}</td>
-        <td class="num">${num(x.qtd_produto, 4)} ${esc(u)}</td><td class="num"><b>${eur(x.custo)}</b></td>
-        <td class="num">${antes != null && Math.abs(antes - x.custo) >= 0.005 ? `${eur(antes)} <small class="${x.custo > antes ? "up" : "down"}">${x.custo > antes ? "+" : ""}${eur(x.custo - antes)}</small>` : '<span class="muted">igual</span>'}</td>
-        <td class="num">${x.pvp ? eur(x.pvp) : "—"}</td><td class="num">${cp != null ? num(cp, 1) + "%" : "—"}</td><td class="num">${num(x.vendidos_30d, 1)}</td></tr>`; }).join("")}
+  return `<p class="lead" style="font-size:13px"><b>Custo</b>: o da receita no Guará. <b>PVP</b>: preço de tabela no ZSbms, com IVA. <b>CMV</b> = custo ÷ PVP sem IVA. <b>Efeito</b>: quanto a última mudança de preço deste produto mexeu no custo de cada prato.</p>
+    <div class="tbl" style="max-height:none"><table><thead><tr><th>Prato</th><th class="num">Usa</th><th class="num">Custo</th><th class="num">PVP</th><th class="num">CMV</th><th class="num">Vendidos (30 dias)</th><th class="num">Efeito</th></tr></thead><tbody>
+    ${pratos.map(x => { const ef = temAnt ? x.qtd_produto * dP : 0;
+      return `<tr><td>${esc(x.nome)}${x.custo_fonte === "faturas" && x.sem_preco ? ` <span class="tag" title="Há ingredientes sem preço: o custo real é maior">${x.sem_preco} sem preço</span>` : ""}</td>
+        <td class="num">${num(x.qtd_produto, 4)} ${esc(u)}</td><td class="num">${custoHtml(x)}</td><td class="num">${pvpHtml(x, x.so_ayce)}</td>
+        <td class="num">${cmvHtml(x.cmv_pct)}</td><td class="num">${num(x.vendidos_30d, 1)}</td>
+        <td class="num">${Math.abs(ef) >= 0.005 ? `<span class="${ef > 0 ? "up" : "down"}">${ef > 0 ? "+" : ""}${eur(ef)}</span>` : '<span class="muted">—</span>'}</td></tr>`; }).join("")}
     </tbody></table></div>`;
+}
+// Custo, PVP e CMV (iguais no detalhe e no separador CMV)
+function custoHtml(x){
+  if (x.custo == null) return `<span class="muted" title="Nem o Guará nem as faturas dão custo a este artigo">sem custo</span>`;
+  const dif = x.custo_fonte === "guara" && x.custo_faturas > 0 && Math.abs(x.custo_faturas / x.custo - 1) > 0.2;
+  return `<b>${eur(x.custo)}</b>${x.custo_fonte === "faturas" ? `<br><small class="muted" title="Sem custo no Guará: calculado com os preços das faturas">pelas faturas</small>`
+    : dif ? `<br><small class="muted" title="Custo da mesma receita com os preços das faturas (com os descontos)">faturas: ${eur(x.custo_faturas)}</small>` : ""}`;
+}
+function pvpHtml(x, ayce){
+  if (ayce) return `<small class="muted" title="Vendido a 0 € dentro do all you can eat">all you can eat</small>`;
+  if (x.pvp == null) return "—";
+  return `${eur(x.pvp)}<br><small class="muted">IVA ${num(x.iva, 0)}%</small>`;
+}
+const cmvHtml = v => v == null ? "—" : `<b class="${v > 35 ? "up" : ""}">${pctS(v)}</b>`;
+
+// ---------- CMV ----------
+async function carregarPratos(){
+  const [de, ate] = periodo();
+  if (!B.de || B.per !== "pers") { B.de = de; B.ate = ate; }
+  desenharPratos(true);
+  try { B.pr = await rpc("compras_bo_pratos", {p_token:B.token, p_de:B.de, p_ate:B.ate}); }
+  catch(e){ if (B.token && $("#prbody")) $("#prbody").innerHTML = `<tr><td colspan="7">${esc(errMsg(e))}</td></tr>`; return; }
+  if (B.tab === "cmv") desenharPratos();
+}
+function desenharPratos(aCarregar){
+  const a = (B.pr && B.pr.artigos) || [];
+  const cats = [...new Set(a.map(x => x.categoria || "Outros"))].sort((x, y) => x.localeCompare(y, "pt"));
+  const opt = (v, t, cur) => `<option value="${v}" ${String(cur) === String(v) ? "selected" : ""}>${t}</option>`;
+  const sb = (k, t) => `<button class="sort" data-action="ordenar-p" data-k="${k}">${t}${B.pSort.k === k ? (B.pSort.dir < 0 ? " ↓" : " ↑") : ""}</button>`;
+  $("#main").innerHTML = `<p class="lead"><b>CMV</b> (custo da mercadoria vendida) = custo ÷ preço de venda sem IVA. <b>Custo</b>: o da receita no Guará (se o Guará não tiver, o das faturas). <b>PVP</b>: o preço de tabela no ZSbms, com o IVA de cada artigo. O CMV global junta tudo o que se vendeu no período: as peças do all you can eat contam no custo e o menu nas vendas.</p>
+    <div class="toolbar">
+      <label class="f grow">Procurar<input id="pq" type="search" value="${esc(B.pq)}" placeholder="Artigo do ZSbms ou receita" autocomplete="off"></label>
+      <label class="f">Período<select id="per">${opt("7", "Últimos 7 dias", B.per)}${opt("30", "Últimos 30 dias", B.per)}${opt("90", "Últimos 90 dias", B.per)}${opt("mes", "Este mês", B.per)}${opt("mesant", "Mês passado", B.per)}${opt("pers", "Escolher datas", B.per)}</select></label>
+      ${B.per === "pers" ? `<label class="f">De<input type="date" id="de" value="${esc(B.de)}"></label><label class="f">Até<input type="date" id="ate" value="${esc(B.ate)}"></label>` : ""}
+      <label class="f">Categoria<select id="pCat"><option value="">Todas</option>${cats.map(c => opt(esc(c), esc(c), B.pCat)).join("")}</select></label>
+      <label class="f">Mostrar<select id="pTipo">${opt("", "Tudo", B.pTipo)}${opt("alto", "CMV acima de 35%", B.pTipo)}${opt("sem", "Sem custo", B.pTipo)}${opt("ayce", "All you can eat", B.pTipo)}</select></label>
+      <button data-action="exportar-pratos">Exportar para Excel</button>
+    </div>
+    <div class="cards" id="pkpis"></div>
+    <div class="tbl"><table><thead><tr><th>Artigo</th><th class="num">${sb("qtd", "Vendidos")}</th><th class="num">Custo</th><th class="num">PVP</th><th class="num">${sb("cmv", "CMV")}</th><th class="num">${sb("vendas", "Vendas s/ IVA")}</th><th class="num">${sb("custo", "Custo total")}</th></tr></thead>
+    <tbody id="prbody">${aCarregar ? `<tr><td colspan="7" class="muted">A carregar…</td></tr>` : ""}</tbody></table></div>`;
+  if (!aCarregar) linhasPratos();
+}
+function pratosFiltrados(){
+  const q = norm(B.pq), a = (B.pr && B.pr.artigos) || [];
+  const l = a.filter(x => (!q || norm(x.descricao + " " + (x.receita || "") + " " + (x.produto || "")).includes(q)) && (!B.pCat || (x.categoria || "Outros") === B.pCat)
+    && (B.pTipo !== "alto" || x.cmv_pct > 35) && (B.pTipo !== "sem" || (x.tipo !== "menu" && x.custo == null)) && (B.pTipo !== "ayce" || x.ayce));
+  const f = {qtd:x => Number(x.qtd), cmv:x => x.cmv_pct, vendas:x => Number(x.vendas_sem_iva) || 0, custo:x => x.custo_total}[B.pSort.k];
+  return l.sort((a, b) => { const x = f(a), y = f(b); if (x == null || y == null) return x == null ? (y == null ? 0 : 1) : -1; return (x < y ? -1 : x > y ? 1 : 0) * B.pSort.dir; });
+}
+function linhasPratos(){
+  if (!$("#prbody")) return;
+  const P = B.pr || {}, a = P.artigos || [], l = pratosFiltrados();
+  const vsi = Number(P.vendas_sem_iva) || 0, cmvG = vsi ? P.custo / vsi * 100 : null, cmvA = Number(P.ayce_vendas) ? P.ayce_custo / P.ayce_vendas * 100 : null;
+  const sem = a.filter(x => x.tipo !== "menu" && x.custo == null), semV = sem.reduce((s, x) => s + (Number(x.vendas_sem_iva) || 0), 0);
+  $("#pkpis").innerHTML = `<div class="kpi"><small>CMV global</small><b class="${cmvG > 35 ? "up" : ""}">${cmvG != null ? pctS(cmvG) : "—"}</b><small>${eur(P.custo)} de custo ÷ ${eur(vsi)} de vendas sem IVA</small></div>
+    <div class="kpi"><small>All you can eat</small><b class="${cmvA > 35 ? "up" : ""}">${cmvA != null ? pctS(cmvA) : "—"}</b><small>${eur(P.ayce_custo)} em peças ÷ ${eur(P.ayce_vendas)} em menus (sem IVA)</small></div>
+    <div class="kpi"><small>Vendas sem IVA</small><b>${eur(vsi)}</b><small>${eur(P.vendas)} com IVA · ${P.dias || 0} ${P.dias === 1 ? "dia" : "dias"} com vendas (${fmtDate(P.de)} – ${fmtDate(P.ate)})</small></div>
+    <div class="kpi"><small>Artigos sem custo</small><b class="${sem.length ? "up" : ""}">${sem.length}</b><small>${sem.length ? eur(semV) + " de vendas sem custo: o CMV real é um pouco maior" : "todos os artigos vendidos têm custo"}</small></div>`;
+  $("#prbody").innerHTML = l.map(x => {
+    const lig = x.tipo === "menu" ? "menu: os componentes contam à parte" : x.receita || x.produto || "sem receita nem produto";
+    return `<tr><td><b>${esc(x.descricao)}</b><br><small class="muted">${esc(lig)}${x.tipo !== "menu" && x.fator != null && Number(x.fator) !== 1 ? " × " + num(x.fator, 3) : ""}${x.categoria ? " · " + esc(x.categoria) : ""}</small></td>
+      <td class="num">${num(x.qtd, 2)}${!x.ayce && Number(x.qtd_paga) !== Number(x.qtd) ? `<br><small class="muted">${num(x.qtd_paga, 2)} pagos</small>` : ""}</td>
+      <td class="num">${x.tipo === "menu" ? '<span class="muted">—</span>' : custoHtml(x)}</td>
+      <td class="num">${pvpHtml(x, x.ayce)}</td><td class="num">${cmvHtml(x.cmv_pct)}</td>
+      <td class="num">${Number(x.vendas_sem_iva) ? eur(x.vendas_sem_iva) : "—"}</td>
+      <td class="num">${x.custo_total != null ? eur(x.custo_total) : "—"}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">${B.pr ? "Sem vendas com estes filtros." : "A carregar…"}</td></tr>`;
+}
+function exportarPratos(){
+  const d = n => n == null ? "" : (Number(n) || 0).toLocaleString("pt-PT", {useGrouping:false, maximumFractionDigits:4});
+  baixarCsv([["Artigo (ZSbms)", "Receita ou produto", "Categoria", "Tipo", "Vendidos", "Pagos", "Custo por unidade (€)", "Origem do custo", "Custo pelas faturas (€)", "PVP com IVA (€)", "IVA %", "PVP sem IVA (€)", "CMV %", "Vendas com IVA (€)", "Vendas sem IVA (€)", "Custo total (€)", "All you can eat"]]
+    .concat(pratosFiltrados().map(x => [x.descricao, x.receita || x.produto || "", x.categoria || "", x.tipo, d(x.qtd), d(x.qtd_paga), d(x.custo), {guara:"Guará", faturas:"faturas"}[x.custo_fonte] || "", d(x.custo_faturas),
+      d(x.pvp), d(x.iva), d(x.pvp_sem_iva), d(x.cmv_pct), d(x.vendas), d(x.vendas_sem_iva), d(x.custo_total), x.ayce ? "sim" : ""])), "cmv_");
 }
 let G = null;
 function grafico(h, u){
@@ -657,6 +736,8 @@ document.addEventListener("click", e => {
   else if (a === "fechar") fecharDetalhe();
   else if (a === "exportar") exportar();
   else if (a === "nova-forma") novaForma(el);
+  else if (a === "exportar-pratos") exportarPratos();
+  else if (a === "ordenar-p") { const k = el.dataset.k; B.pSort = {k, dir:B.pSort.k === k ? -B.pSort.dir : -1}; desenharPratos(); }
   else if (a === "ordenar") { const k = el.dataset.k, so = B.vista === "resumo" ? "sortR" : "sort"; B[so] = {k, dir:B[so].k === k ? -B[so].dir : -1}; desenharPrecos(); }
 });
 document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches && e.target.matches("tr.click")) abrirDetalhe(e.target.dataset.p); });
