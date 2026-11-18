@@ -3066,3 +3066,141 @@ begin
   return rid;
 end $function$;
 grant execute on function public.compras_save_supplier(text, uuid, text, text, text, text, numeric, text, text) to anon, authenticated;
+
+-- ===================== Garcias: IEC à parte, correções de faturas e conferência no documento (18/11) =====================
+-- Desde 19/10 a Garcias mostra o IEC (imposto sobre o álcool) numa coluna à parte e o Guará lê o "Pr. Unit." sem IEC.
+-- compras__guara_iec junta o IEC às bebidas espirituosas (≥ 15% vol.) quando a soma das linhas fica abaixo do total sem IVA:
+-- IEC = litros × grau × 16,0265 € (taxa de 2026 por litro de álcool puro; atualizar quando mudar). Preço marcado como estimado ("iec").
+create or replace function public.compras__guara_iec(p_fat jsonb)
+ returns jsonb
+ language plpgsql
+ immutable
+ set search_path to 'public'
+as $function$
+declare
+  taxa constant numeric := 16.0265;
+  semiva numeric := nullif(p_fat->>'total_sem_iva','')::numeric;
+  l jsonb; novas jsonb := '[]'::jsonb; soma numeric := 0; falta numeric; iec_total numeric := 0; fator numeric := 1;
+  resto numeric; outras numeric := 0; d text; grau numeric; litros numeric; m text[]; q numeric; p numeric; iec numeric; n int := 0;
+begin
+  if semiva is null or semiva <= 0 then return p_fat; end if;
+  select coalesce(sum((x->>'qty')::numeric * (x->>'price')::numeric), 0) into soma
+    from jsonb_array_elements(coalesce(p_fat->'linhas','[]')) x where nullif(x->>'price','') is not null and nullif(x->>'qty','') is not null;
+  falta := semiva - soma;
+  if falta <= greatest(0.5, semiva * 0.02) then return p_fat; end if;
+  -- 1.ª volta: IEC de cada bebida espirituosa
+  for l in select * from jsonb_array_elements(p_fat->'linhas') loop
+    d := coalesce(l->>'desc',''); grau := null; litros := null;
+    m := regexp_match(d, '([0-9]+(?:[.,][0-9]+)?)\s*%');
+    if m is not null then grau := replace(m[1], ',', '.')::numeric; end if;
+    m := regexp_match(substring(d from position('%' in d) + 1), '([0-9]+(?:[.,][0-9]+)?)\s*(cl|lt|l)?', 'i');
+    if grau is not null and m is not null then litros := replace(m[1], ',', '.')::numeric / case when lower(coalesce(m[2],'')) = 'cl' then 100 else 1 end; end if;
+    if (litros is null or litros <= 0 or litros > 5) and nullif(l->>'pack_qty','') is not null then litros := (l->>'pack_qty')::numeric; end if;
+    if grau >= 15 and grau <= 80 and litros > 0 and litros <= 5 and nullif(l->>'qty','')::numeric > 0 then
+      l := l || jsonb_build_object('_iec', round(litros * grau / 100 * taxa, 4));
+      iec_total := iec_total + (l->>'qty')::numeric * litros * grau / 100 * taxa;
+    elsif nullif(l->>'price','') is not null and coalesce(l->>'desc','') !~* '(vasilhame|cau[cç][aã]o|dep[oó]sito)' then
+      outras := outras + coalesce((l->>'qty')::numeric, 0) * (l->>'price')::numeric;
+    end if;
+    novas := novas || jsonb_build_array(l);
+  end loop;
+  if iec_total <= 0 then return p_fat; end if;
+  if iec_total > falta then fator := falta / iec_total; end if;
+  resto := falta - least(iec_total, falta);
+  -- 2.ª volta: aplicar
+  p_fat := jsonb_set(p_fat, '{linhas}', '[]'::jsonb);
+  for l in select * from jsonb_array_elements(novas) loop
+    p := nullif(l->>'price','')::numeric;
+    if l ? '_iec' and p is not null then
+      iec := round((l->>'_iec')::numeric * fator, 4);
+      l := (l - '_iec') || jsonb_build_object('price', round(p + iec, 4), 'price_guara', coalesce(l->'price_guara', to_jsonb(p)), 'iec', iec, 'price_estimado', 'iec');
+      n := n + 1;
+    elsif p is not null and resto > 0.01 and outras > 0 and resto <= soma * 0.05 and coalesce(l->>'desc','') !~* '(vasilhame|cau[cç][aã]o|dep[oó]sito)' then
+      l := l || jsonb_build_object('price', round(p * (1 + resto / outras), 4), 'price_guara', coalesce(l->'price_guara', to_jsonb(p)), 'price_estimado', 'iec');
+    end if;
+    p_fat := jsonb_set(p_fat, '{linhas}', (p_fat->'linhas') || jsonb_build_array(l));
+  end loop;
+  return p_fat || jsonb_build_object('iec', jsonb_build_object('falta', round(falta, 2), 'iec', round(least(iec_total, falta), 2), 'resto', round(resto, 2), 'linhas', n));
+end $function$;
+revoke all on function public.compras__guara_iec(jsonb) from public, anon, authenticated;
+
+create or replace function public.compras_guara_receber(p_fat jsonb)
+ returns jsonb
+ language plpgsql
+ security definer
+ set search_path to 'public', 'extensions'
+as $function$
+declare gid int := nullif(p_fat->>'guara_id','')::int; sid uuid; numk text; l jsonb; novas int := 0; uteis int := 0; r jsonb;
+begin
+  if gid is null then raise exception 'sem_guara_id'; end if;
+  if exists (select 1 from public.compras_guara_faturas where guara_id = gid) then return jsonb_build_object('estado', 'vista'); end if;
+  p_fat := public.compras__guara_precos(public.compras__guara_iec(p_fat));
+  sid := public.compras__fornecedor(p_fat->>'fornecedor_nome');
+  numk := lower(regexp_replace(coalesce(p_fat->>'numero',''), '\s', '', 'g'));
+  if sid is not null and numk <> '' and exists (select 1 from public.compras_invoices i where i.supplier_id = sid and lower(regexp_replace(coalesce(i.numero,''), '\s', '', 'g')) = numk) then
+    insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, tratado_em)
+    values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric, 'ja_existia', p_fat, now());
+    return jsonb_build_object('estado', 'ja_existia');
+  end if;
+  for l in select * from jsonb_array_elements(coalesce(p_fat->'linhas','[]')) loop
+    if nullif(l->>'price','') is null then continue; end if;
+    uteis := uteis + 1;
+    if sid is null or (not exists (select 1 from public.compras_offers o where o.supplier_id = sid and lower(o.alias) = lower(l->>'desc'))
+                       and not exists (select 1 from public.compras_offer_aliases a where a.supplier_id = sid and a.alias = lower(l->>'desc'))) then novas := novas + 1; end if;
+  end loop;
+  if uteis > 0 and novas = 0 then
+    r := public.compras__import_invoice(public.compras__chefe_principal(), p_fat);
+    insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, resultado, tratado_em)
+    values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric,
+            case when r ? 'ignorada' then 'ja_existia' else 'importada' end, p_fat, r, now());
+    return jsonb_build_object('estado', case when r ? 'ignorada' then 'ja_existia' else 'importada' end) || r;
+  end if;
+  insert into public.compras_guara_faturas (guara_id, fornecedor, numero, data, total, estado, dados, resultado, tratado_em)
+  values (gid, coalesce(p_fat->>'fornecedor_nome',''), coalesce(p_fat->>'numero',''), nullif(p_fat->>'data','')::date, nullif(p_fat->>'total','')::numeric,
+          case when uteis = 0 then 'ignorada' else 'pendente' end, p_fat,
+          case when uteis = 0 then jsonb_build_object('motivo', 'sem_artigos_com_preco') else jsonb_build_object('linhas', uteis, 'novas', novas) end,
+          case when uteis = 0 then now() end);
+  return jsonb_build_object('estado', case when uteis = 0 then 'ignorada' else 'pendente' end, 'linhas', uteis, 'novas', novas);
+end $function$;
+
+-- Corrige o preço de linhas de uma fatura já gravada (ex.: o Guará leu o preço sem o IEC da Garcias).
+-- p_precos: [{"desc": "...", "price": 11.95, "qty": 1 (opcional)}] (preço da embalagem sem IVA, como na linha).
+-- Atualiza a linha (o preço antigo fica em price_guara e o motivo em price_corrigido), o histórico de preços dessa
+-- fatura (na mesma proporção) e as ofertas desses produtos nesse fornecedor (último e anterior preço).
+create or replace function public.compras__corrigir_fatura(p_invoice uuid, p_precos jsonb, p_motivo text)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare inv public.compras_invoices; l jsonb; c jsonb; novas jsonb := '[]'::jsonb; n int := 0; pid uuid; velho numeric; novo numeric;
+  afetados uuid[] := '{}';
+begin
+  select * into inv from public.compras_invoices where id = p_invoice for update;
+  if not found then raise exception 'fatura_nao_existe'; end if;
+  for l in select * from jsonb_array_elements(inv.linhas) loop
+    c := null;
+    select x into c from jsonb_array_elements(p_precos) x
+     where lower(btrim(x->>'desc')) = lower(btrim(l->>'desc')) and (x->>'qty' is null or (x->>'qty')::numeric = (l->>'qty')::numeric) limit 1;
+    velho := nullif(l->>'price', '')::numeric; novo := (c->>'price')::numeric;
+    if c is not null and novo is not null and novo is distinct from velho then
+      pid := coalesce(nullif(l->>'product_id','')::uuid,
+        (select o.product_id from public.compras_offers o where o.supplier_id = inv.supplier_id and lower(o.alias) = lower(l->>'desc') limit 1),
+        (select a.product_id from public.compras_offer_aliases a where a.supplier_id = inv.supplier_id and a.alias = lower(l->>'desc')));
+      l := l || jsonb_build_object('price', novo, 'price_guara', coalesce(l->'price_guara', to_jsonb(velho)), 'price_corrigido', p_motivo);
+      if pid is not null and velho > 0 then
+        update public.compras_price_history set unit_price = round(unit_price * novo / velho, 6) where invoice_id = p_invoice and product_id = pid;
+        afetados := afetados || pid;
+      end if;
+      n := n + 1;
+    end if;
+    novas := novas || jsonb_build_array(l);
+  end loop;
+  update public.compras_invoices set linhas = novas where id = p_invoice;
+  -- ofertas: último preço e o anterior (de outra fatura), a partir do histórico
+  update public.compras_offers o set unit_price = u.unit_price, pack_price = round(u.unit_price * o.pack_qty, 4), data = u.data, invoice_id = u.invoice_id,
+         prev_unit_price = a.unit_price, prev_data = a.data
+    from (select distinct on (h.product_id) h.product_id, h.unit_price, h.data, h.invoice_id from public.compras_price_history h
+           where h.supplier_id = inv.supplier_id and h.product_id = any(afetados) order by h.product_id, h.data desc, h.id desc) u
+    left join lateral (select h2.unit_price, h2.data from public.compras_price_history h2
+           where h2.supplier_id = inv.supplier_id and h2.product_id = u.product_id and h2.invoice_id <> u.invoice_id order by h2.data desc, h2.id desc limit 1) a on true
+   where o.product_id = u.product_id and o.supplier_id = inv.supplier_id;
+  return jsonb_build_object('fatura', inv.numero, 'linhas_corrigidas', n, 'produtos', cardinality(afetados));
+end $$;
+revoke all on function public.compras__corrigir_fatura(uuid, jsonb, text) from public, anon, authenticated;
