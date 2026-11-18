@@ -3204,3 +3204,84 @@ begin
   return jsonb_build_object('fatura', inv.numero, 'linhas_corrigidas', n, 'produtos', cardinality(afetados));
 end $$;
 revoke all on function public.compras__corrigir_fatura(uuid, jsonb, text) from public, anon, authenticated;
+
+-- ===================== Descrições escritas de outra maneira e juntar produtos (18/11) =====================
+-- Chave de uma descrição de fatura que ignora maiúsculas, acentos, pontuação e espaços, a vírgula/ponto decimal,
+-- zeros à direita nas casas decimais (0,70 = 0.7) e uma letra entre parênteses no fim ("1 L (B)" = "1 L").
+create or replace function public.compras__desc_chave(p text)
+returns text language sql immutable set search_path = public as $$
+  select btrim(regexp_replace(
+    regexp_replace(
+      regexp_replace(
+        regexp_replace(
+          regexp_replace(
+            translate(lower(coalesce(p, '')), 'áàâãäéèêëíìîïóòôõöúùûüçñ', 'aaaaaeeeeiiiiooooouuuucn'),
+            '\(\s*[a-z]\s*\)\s*$', ''),                 -- "(B)" no fim
+          '([0-9])\s*[.,]\s*([0-9])', '\1.\2', 'g'),    -- 0,70 / 0.70 / 0 . 70
+        '(\.[0-9]*?)0+(?![0-9])', '\1', 'g'),           -- 0.70 -> 0.7 ; 1.0 -> 1.
+      '\.(?![0-9])|(?<![0-9])\.|[^a-z0-9.]+', ' ', 'g'),
+    '\s+', ' ', 'g'))
+$$;
+
+-- Artigo de um fornecedor pela chave da descrição (só quando aponta para um único produto)
+create or replace function public.compras__artigo_chave(p_sid uuid, p_desc text)
+returns table(product_id uuid, pack_qty numeric) language sql stable security definer set search_path = public as $$
+  with k as (select public.compras__desc_chave(p_desc) k),
+  c as (select o.product_id, o.pack_qty from public.compras_offers o, k where o.supplier_id = p_sid and k.k <> '' and public.compras__desc_chave(o.alias) = k.k
+        union all
+        select a.product_id, a.pack_qty from public.compras_offer_aliases a, k where a.supplier_id = p_sid and k.k <> '' and public.compras__desc_chave(a.alias) = k.k)
+  select c.product_id, max(c.pack_qty) from c group by c.product_id
+  having (select count(distinct c2.product_id) from c c2) = 1
+$$;
+revoke all on function public.compras__artigo_chave(uuid, text) from public, anon, authenticated;
+
+-- compras__save_invoice: depois da descrição exata (oferta e descrições alternativas), procura pela chave;
+-- o preço anterior só se perde quando muda o artigo (chave diferente), não quando muda a pontuação
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras__save_invoice'::regproc);
+  d2 := d;
+  if position('compras__artigo_chave' in d2) = 0 then
+    d2 := regexp_replace(d2, '(a\.alias = lower\(l->>''desc''\);\s*end if;)',
+      '\1
+      -- a mesma descrição escrita de outra maneira (pontuação, espaços, 0,70/0.70, "(B)" no fim)
+      if known_pid is null then select k.product_id, k.pack_qty into known_pid, known_pq from public.compras__artigo_chave(sid, l->>''desc'') k; end if;');
+  end if;
+  d2 := replace(d2, 'lower(coalesce(prev.alias,'''')) <> lower(coalesce(l->>''desc'',''''))',
+                    'public.compras__desc_chave(prev.alias) <> public.compras__desc_chave(l->>''desc'')');
+  if d2 <> d then execute d2; end if;
+end $$;
+
+-- compras_guara_receber: um artigo com a mesma chave não conta como novo
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras_guara_receber'::regproc);
+  if position('compras__artigo_chave' in d) = 0 then
+    d2 := replace(d, 'and a.alias = lower(l->>''desc''))) then novas := novas + 1;',
+      'and a.alias = lower(l->>''desc''))
+                       and not exists (select 1 from public.compras__artigo_chave(sid, l->>''desc''))) then novas := novas + 1;');
+    if d2 <> d then execute d2; end if;
+  end if;
+end $$;
+
+-- Juntar produtos: guarda também a descrição do produto que fica, a data do preço anterior e passa as linhas das faturas
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras__merge_products'::regproc);
+  if position('compras_invoices' in d) = 0 then
+    d2 := replace(d, 'prev_unit_price = cur.unit_price, data = o.data', 'prev_unit_price = cur.unit_price, prev_data = cur.data, data = o.data');
+    d2 := replace(d2, 'if coalesce(o.data, ''1900-01-01''::date) > coalesce(cur.data, ''1900-01-01''::date) then',
+      'if coalesce(cur.alias, '''') <> '''' then
+          insert into public.compras_offer_aliases (supplier_id, alias, product_id, pack_qty, origem)
+          values (cur.supplier_id, lower(cur.alias), p_into, cur.pack_qty, ''juntar'') on conflict (supplier_id, alias) do nothing;
+        end if;
+        if coalesce(o.data, ''1900-01-01''::date) > coalesce(cur.data, ''1900-01-01''::date) then');
+    d2 := replace(d2, 'delete from public.compras_products where id = p_from;',
+      'update public.compras_invoices set linhas = replace(linhas::text, p_from::text, p_into::text)::jsonb where linhas::text like ''%'' || p_from::text || ''%'';
+  delete from public.compras_products where id = p_from;');
+    execute d2;
+  end if;
+end $$;
