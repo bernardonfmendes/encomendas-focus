@@ -167,7 +167,8 @@ Boa tarde! Encomenda do Focus Sushi & Steak:
 - 10 un Abacate
 - 3 × Coca-Cola lata
 
-Entrega: quinta-feira, 20 de novembro
+Nif: 515750115
+Entrega: sexta-feira, 20 de novembro
 Nota: entregar antes das 11h
 
 Obrigado.
@@ -176,6 +177,7 @@ Obrigado.
 - Granel: "1,5 kg Descrição". Embalagem: "2 × Descrição [18 L]" e "(ref. X)" se houver referência.
 - Se o dono definiu um **nome na encomenda** para esse fornecedor, vai só esse nome, sem embalagem nem referência.
 - Pedido numa forma escolhida: "10 un Abacate".
+- **Texto extra do fornecedor** (Gestão › Fornecedores), em todas as mensagens a esse fornecedor, antes da entrega e da nota. Ex.: a Keta Foods recebe "Nif: 515750115".
 
 **Notificações:** quando um colaborador envia, os chefes recebem "Nova encomenda por confirmar · Ana fez um pedido · 3 por confirmar" (no máximo um aviso a cada 30 s). Quando o chefe confirma ou rejeita, o autor recebe o aviso. O número de pedidos por confirmar aparece no ícone da app (chefe). A lista atualiza a cada 30 s e o catálogo a cada 5 min, enquanto a app está aberta.
 
@@ -218,7 +220,7 @@ Três abas (segmentado): **Preços** · **Ler faturas (N)** · **Histórico**.
 
 - **Restaurante:** nome, que aparece nas mensagens.
 - **Equipa:** nome, perfil (colaborador/chefe), sítio e novo PIN opcional; desativar ou reativar; "Adicionar pessoa" com "Gerar PIN" (6 números ao acaso). Ninguém pode tirar a si próprio o acesso de chefe.
-- **Fornecedores:** nome, WhatsApp, dias de encomenda/entrega (texto livre), NIF, mínimo de entrega (€ sem IVA) e "Encomendas por": número ou grupo de WhatsApp.
+- **Fornecedores:** nome, WhatsApp, dias de encomenda/entrega (texto livre), NIF, mínimo de entrega (€ sem IVA), "Encomendas por" (número ou grupo de WhatsApp) e "Texto extra na mensagem" (ex.: "Nif: 515750115").
 - **Produtos:** procura (ou "sem preço"), corrigir nome, categoria e unidade, **"Juntar com"** (dois produtos que são o mesmo passam a um só, com os preços de todos os fornecedores, as descrições das faturas, o nome na encomenda e a ligação às receitas) e apagar.
 
 ### 4.8 Sem rede, instalação e notificações
@@ -346,7 +348,7 @@ Tabelas principais (Postgres; prefixo `compras_`):
 | `users` | nome, hash do PIN, perfil, ativo, tentativas falhadas, bloqueado até, sítio |
 | `sessions` | hash do token, utilizador, validade (60 dias) |
 | `settings` | nome do restaurante, início do stock, dono |
-| `suppliers` | nome, NIF, telefone, dias, mínimo, via (número/grupo) |
+| `suppliers` | nome, NIF, telefone, dias, mínimo, via (número/grupo), texto extra da mensagem |
 | `products` | nome, categoria, unidade, sítios, `receita_fator` |
 | `offers` | produto × fornecedor: descrição da fatura (`alias`), referência, embalagem, preço da embalagem, preço por unidade (atual e anterior, com datas), nome na encomenda, formas de encomenda |
 | `offer_aliases` | descrições alternativas → produto e embalagem |

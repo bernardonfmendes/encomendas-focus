@@ -3015,3 +3015,54 @@ begin
   into r;
   return r;
 end $function$;
+
+-- ===================== Texto extra na mensagem da encomenda, por fornecedor (18/11) =====================
+-- Ex.: a Keta Foods pede o NIF do restaurante em cada encomenda: mensagem = 'Nif: 515750115'.
+alter table public.compras_suppliers add column if not exists mensagem text not null default '';
+
+create or replace function public.compras_catalog(p_token text)
+ returns jsonb
+ language plpgsql
+ security definer
+ set search_path to 'public', 'extensions'
+as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  return jsonb_build_object(
+    'restaurante', (select restaurante from public.compras_settings where id = 1),
+    'suppliers', coalesce((select jsonb_agg(jsonb_build_object('id', s.id, 'nome', s.nome, 'telefone', s.telefone, 'dias', s.dias, 'nif', s.nif, 'minimo', s.minimo, 'via', s.via, 'mensagem', s.mensagem) order by lower(s.nome)) from public.compras_suppliers s), '[]'),
+    'products', coalesce((select jsonb_agg(jsonb_build_object(
+        'id', p.id, 'nome', p.nome, 'categoria', p.categoria, 'unidade', p.unidade, 'setores', to_jsonb(p.setores),
+        'offers', coalesce((select jsonb_agg(jsonb_build_object('supplier_id', o.supplier_id, 'alias', o.alias, 'nome_encomenda', o.nome_encomenda,
+             'forma_encomenda', o.forma_encomenda, 'formas', to_jsonb(public.compras__formas_oferta(o)), 'codigo', o.codigo,
+             'pack_qty', o.pack_qty, 'pack_price', o.pack_price, 'unit_price', o.unit_price, 'prev_unit_price', o.prev_unit_price, 'prev_data', o.prev_data, 'data', o.data)
+             order by o.unit_price) from public.compras_offers o where o.product_id = p.id), '[]')
+      ) order by lower(p.nome)) from public.compras_products p), '[]')
+  );
+end $function$;
+
+drop function if exists public.compras_save_supplier(text, uuid, text, text, text, text, numeric, text);
+create or replace function public.compras_save_supplier(p_token text, p_id uuid, p_nome text, p_telefone text, p_dias text, p_nif text,
+  p_minimo numeric default null, p_via text default null, p_mensagem text default null)
+returns uuid language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; rid uuid; v_via text := case when p_via in ('numero','grupo') then p_via end;
+begin
+  u := public.compras__chefe(p_token);
+  if coalesce(trim(p_nome),'') = '' then raise exception 'nome_obrigatorio'; end if;
+  if p_minimo is not null and p_minimo < 0 then raise exception 'preco_invalido'; end if;
+  -- p_minimo / p_via / p_mensagem: null = não mexer; p_minimo 0 = sem mínimo
+  if p_id is null then
+    insert into public.compras_suppliers (nome, telefone, dias, nif, minimo, via, mensagem)
+    values (trim(p_nome), coalesce(trim(p_telefone),''), coalesce(trim(p_dias),''), regexp_replace(coalesce(p_nif,''),'\D','','g'),
+            nullif(p_minimo, 0), coalesce(v_via, 'numero'), left(coalesce(trim(p_mensagem), ''), 300))
+    returning id into rid;
+  else
+    update public.compras_suppliers set nome = trim(p_nome), telefone = coalesce(trim(p_telefone),''), dias = coalesce(trim(p_dias),''),
+      nif = regexp_replace(coalesce(p_nif,''),'\D','','g'), minimo = case when p_minimo is null then minimo else nullif(p_minimo, 0) end,
+      via = coalesce(v_via, via), mensagem = case when p_mensagem is null then mensagem else left(trim(p_mensagem), 300) end
+    where id = p_id returning id into rid;
+  end if;
+  return rid;
+end $function$;
+grant execute on function public.compras_save_supplier(text, uuid, text, text, text, text, numeric, text, text) to anon, authenticated;

@@ -670,8 +670,12 @@ function waMessage(o, items){
     return "- " + qs + " " + (it.alias || it.nome) + (pq !== 1 ? " [" + num(pq, 3) + " " + bu + "]" : "") + (it.codigo ? " (ref. " + it.codigo + ")" : "");
   }).join("\n");
   let m = saudacao() + "! Encomenda do " + ((S.me && S.me.restaurante) || "restaurante") + ":\n" + lines;
-  if (o.entrega) m += "\n\nEntrega: " + new Date(o.entrega + "T12:00:00").toLocaleDateString("pt-PT", {weekday:"long", day:"numeric", month:"long"});
-  if (o.nota) m += "\nNota: " + o.nota;
+  // texto extra do fornecedor (Gestão › Fornecedores), ex.: "Nif: 515750115" para a Keta Foods
+  const info = [], extra = String(supById(o.supplier_id).mensagem || "").trim();
+  if (extra) info.push(extra);
+  if (o.entrega) info.push("Entrega: " + new Date(o.entrega + "T12:00:00").toLocaleDateString("pt-PT", {weekday:"long", day:"numeric", month:"long"}));
+  if (o.nota) info.push("Nota: " + o.nota);
+  if (info.length) m += "\n\n" + info.join("\n");
   return m + "\n\nObrigado.";
 }
 function viewOrders(){
@@ -999,19 +1003,21 @@ function viewGestao(){
       <label class="f">PIN (6 números)<input id="nuPin" inputmode="numeric" maxlength="6" autocomplete="off"></label></div>
       <div class="row" style="margin-top:10px"><button class="primary small" data-action="user-add">Adicionar</button><button class="small" data-action="gen-pin">Gerar PIN</button></div></div></div>`;
   // suppliers
-  h += `<h2 style="margin-top:20px">Fornecedores</h2><p class="lead">O WhatsApp é usado para abrir a mensagem da encomenda.</p><div class="stack">`;
+  h += `<h2 style="margin-top:20px">Fornecedores</h2><p class="lead">O WhatsApp é usado para abrir a mensagem da encomenda. O texto extra vai em todas as mensagens a esse fornecedor (ex.: o NIF do restaurante).</p><div class="stack">`;
   if (!S.suppliers.length) h += `<p class="muted">Os fornecedores são criados quando lê a primeira fatura de cada um.</p>`;
   h += S.suppliers.map(s => `<div class="card"><div class="grid2">
       <label class="f">Nome<input id="sn-${s.id}" value="${esc(s.nome)}"></label><label class="f">WhatsApp<input id="st-${s.id}" value="${esc(s.telefone)}" inputmode="tel" placeholder="912 345 678"></label>
       <label class="f">Dias de encomenda / entrega<input id="sd-${s.id}" value="${esc(s.dias)}" placeholder="Ex.: encomenda seg/qui"></label><label class="f">NIF<input id="sf-${s.id}" value="${esc(s.nif)}" inputmode="numeric"></label>
       <label class="f">Mínimo de entrega (€ sem IVA)<input id="sm-${s.id}" value="${s.minimo ? esc(num(s.minimo)) : ""}" inputmode="decimal" placeholder="Sem mínimo"></label>
-      <label class="f">Encomendas por<select id="sv-${s.id}"><option value="numero" ${s.via !== "grupo" ? "selected" : ""}>Número de WhatsApp</option><option value="grupo" ${s.via === "grupo" ? "selected" : ""}>Grupo de WhatsApp</option></select></label></div>
+      <label class="f">Encomendas por<select id="sv-${s.id}"><option value="numero" ${s.via !== "grupo" ? "selected" : ""}>Número de WhatsApp</option><option value="grupo" ${s.via === "grupo" ? "selected" : ""}>Grupo de WhatsApp</option></select></label>
+      <label class="f">Texto extra na mensagem<input id="sx-${s.id}" value="${esc(s.mensagem || "")}" maxlength="300" placeholder="Ex.: Nif: 515750115"></label></div>
       <div class="row" style="margin-top:10px"><button class="small" data-action="sup-save" data-s="${s.id}">Guardar</button>${s.via === "grupo" ? '<small class="muted">Encomendas enviadas no grupo</small>' : waPhone(s.telefone) ? `<a class="btn small primary" href="https://wa.me/${waPhone(s.telefone)}" target="_blank" rel="noopener">WhatsApp</a>` : '<small class="muted">Sem número de WhatsApp</small>'}</div></div>`).join("")
     + `<div class="card"><h3 style="margin-bottom:8px">Adicionar fornecedor</h3><div class="grid2">
       <label class="f">Nome<input id="nsNome" autocomplete="off"></label><label class="f">WhatsApp<input id="nsTel" inputmode="tel" placeholder="912 345 678"></label>
       <label class="f">Dias de encomenda / entrega<input id="nsDias" placeholder="Ex.: encomenda seg/qui"></label>
       <label class="f">Mínimo de entrega (€ sem IVA)<input id="nsMin" inputmode="decimal" placeholder="Sem mínimo"></label>
-      <label class="f">Encomendas por<select id="nsVia"><option value="numero">Número de WhatsApp</option><option value="grupo">Grupo de WhatsApp</option></select></label></div>
+      <label class="f">Encomendas por<select id="nsVia"><option value="numero">Número de WhatsApp</option><option value="grupo">Grupo de WhatsApp</option></select></label>
+      <label class="f">Texto extra na mensagem<input id="nsMsg" maxlength="300" placeholder="Ex.: Nif: 515750115"></label></div>
       <div class="row" style="margin-top:10px"><button class="small primary" data-action="sup-add">Adicionar</button></div></div></div>`;
   // products
   h += `<h2 style="margin-top:20px">Produtos (${S.products.length})</h2><p class="lead">Quando o mesmo produto aparece com dois nomes, use “Juntar com” para ficar um só, com os preços de todos os fornecedores.</p>
@@ -1195,7 +1201,7 @@ document.addEventListener("click", async ev => {
     else if (a === "open-draft") { const d = S.drafts.find(x => x.id === b.dataset.d); if (d && d.resultado) { S.review = buildReview(d.resultado); S.review.draftId = d.id; render(); window.scrollTo(0, 0); } }
     else if (a === "del-draft") { b.disabled = true; await rpc("compras_draft_delete", {p_token:S.token, p_id:b.dataset.d}); await loadDrafts(); render(); }
     else if (a === "sup-add") {
-      await rpc("compras_save_supplier", {p_token:S.token, p_id:null, p_nome:val("nsNome"), p_telefone:val("nsTel"), p_dias:val("nsDias"), p_nif:"", p_minimo:minVal("nsMin"), p_via:val("nsVia")});
+      await rpc("compras_save_supplier", {p_token:S.token, p_id:null, p_nome:val("nsNome"), p_telefone:val("nsTel"), p_dias:val("nsDias"), p_nif:"", p_minimo:minVal("nsMin"), p_via:val("nsVia"), p_mensagem:val("nsMsg")});
       await loadCatalog(); render(); toast("Fornecedor adicionado.");
     }
     else if (a === "set-phone") {
@@ -1218,7 +1224,7 @@ document.addEventListener("click", async ev => {
       await rpc("compras_user_save", {p_token:S.token, p_id:u.id, p_nome:a === "user-save" ? val("un-" + u.id) : u.nome, p_role:a === "user-save" && !u.eu ? val("ur-" + u.id) : u.role, p_ativo:a === "user-toggle" ? !u.ativo : u.ativo, p_pin:pin || null, p_setor:a === "user-save" ? (val("us-" + u.id) || null) : (u.setor || null)});
       toast(pin ? "Guardado. Novo PIN: " + pin : "Guardado."); await loadUsers(); render();
     }
-    else if (a === "sup-save") { const id = b.dataset.s; await rpc("compras_save_supplier", {p_token:S.token, p_id:id, p_nome:val("sn-" + id), p_telefone:val("st-" + id), p_dias:val("sd-" + id), p_nif:val("sf-" + id), p_minimo:minVal("sm-" + id), p_via:val("sv-" + id)}); await Promise.all([loadCatalog(), loadOrders()]); render(); toast("Fornecedor guardado."); }
+    else if (a === "sup-save") { const id = b.dataset.s; await rpc("compras_save_supplier", {p_token:S.token, p_id:id, p_nome:val("sn-" + id), p_telefone:val("st-" + id), p_dias:val("sd-" + id), p_nif:val("sf-" + id), p_minimo:minVal("sm-" + id), p_via:val("sv-" + id), p_mensagem:val("sx-" + id)}); await Promise.all([loadCatalog(), loadOrders()]); render(); toast("Fornecedor guardado."); }
     else if (a === "prod-save") { const id = b.dataset.p; await rpc("compras_save_product", {p_token:S.token, p_id:id, p_nome:val("pn-" + id), p_categoria:val("pc-" + id), p_unidade:val("pu-" + id)}); await loadCatalog(); render(); toast("Produto guardado."); }
     else if (a === "merge") {
       const from = b.dataset.p, into = val("pm-" + from); if (!into) { toast("Escolha o produto com que quer juntar."); return; }
