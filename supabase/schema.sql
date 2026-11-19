@@ -3991,3 +3991,19 @@ begin
   return r;
 end $$;
 revoke all on function public.compras_relatorio_dia(date) from public, anon, authenticated;
+
+-- Prioridade na fila das faturas antigas (19/11): as da Garcias primeiro (Mateus, Papa Figos e Famous Grouse sem custo no CMV)
+alter table public.compras_guara_doc_fila add column if not exists prioridade integer not null default 0;
+create or replace function public.compras__doc_fila_proximas(p_n integer)
+returns setof public.compras_guara_doc_fila language plpgsql security definer set search_path = public as $$
+begin
+  update public.compras_guara_doc_fila set estado = 'pendente', a_ler_desde = null
+   where estado = 'a_ler' and a_ler_desde < now() - interval '4 minutes';
+  if (select pausa_ate from public.compras_guara_doc_estado) > now() then return; end if;
+  return query
+  update public.compras_guara_doc_fila f set estado = 'a_ler', a_ler_desde = now(), tentativas = f.tentativas + 1
+   where f.guara_id in (select guara_id from public.compras_guara_doc_fila where estado = 'pendente'
+                         order by prioridade desc, data desc nulls last, guara_id desc limit greatest(1, least(p_n, 20)) for update skip locked)
+  returning f.*;
+end $$;
+revoke all on function public.compras__doc_fila_proximas(integer) from public, anon, authenticated;
