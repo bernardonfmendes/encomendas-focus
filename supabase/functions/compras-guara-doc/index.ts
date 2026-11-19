@@ -205,6 +205,8 @@ async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido
     }
     if (fraco) return fraco;
     if (limite && modelos.every((m) => esgotados.has(m))) throw new LimiteIA(limite.ate, limite.motivo);
+    // todos os modelos sobrecarregados (503) ou sem resposta a tempo: não é culpa da fatura; pausa 5 min sem contar tentativa
+    if (erros.length && erros.every((e) => /: 503 |tempo_esgotado|sem_tempo/.test(e))) throw new LimiteIA(new Date(Date.now() + 300_000), "gemini_sobrecarregada");
     return { ok: false, erro, erros, paginas };
   } finally {
     for (const n of ficheiros) await apagarFicheiro(n);
