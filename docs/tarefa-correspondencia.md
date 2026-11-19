@@ -53,5 +53,13 @@ Regras: usa só o conector Supabase (ferramentas mcp__Supabase__*, carrega-as co
    a) stock baixo (até 10): select p.nome, round(s.stock,2) stock, p.unidade, round(s.consumo_dia,2) consumo_dia from compras__stock_rows() s join compras_products p on p.id = s.product_id where s.consumo_dia > 0 and s.stock < s.consumo_dia * 3 order by s.stock / nullif(s.consumo_dia, 0) limit 10;
    b) subidas de preço de 5% ou mais nos últimos 2 dias: compras_offers com prev_unit_price > 0, unit_price >= prev_unit_price * 1.05 e data >= current_date - 2, com os nomes de compras_products e compras_suppliers (até 10).
 
-6. Resumo final (curto, em lista; é o que o dono recebe no telemóvel): faturas importadas (fornecedor, número e artigos novos com produto e embalagem escolhidos), produtos novos criados, faturas antigas (lidas de 872, artigos ligados hoje e quantos faltam), ingredientes ligados, artigos do ZSbms ligados, e o que ficou por decidir com a razão, para o dono rever.
+6. Relatório da manhã (é o que o dono recebe no telemóvel; escreve-o sempre, mesmo que não haja nada para fazer). Curto, em lista, com este formato:
+   Relatório da manhã — dd/mm
+   • Importações das 10h: vendas do ZSbms até dd/mm, faturas e receitas do Guará (ok, ou o erro).
+   • Faturas novas importadas: fornecedor, nº e artigos novos com o produto e a embalagem escolhidos (ou "nenhuma").
+   • Produtos novos criados.
+   • Faturas antigas: lidas X de 872 (Y nas últimas 24 h: select count(*) from compras_guara_doc_fila where lida_em > now() - interval '24 hours'); artigos ligados hoje, ignorados, e quantos faltam.
+   • Ingredientes ligados e artigos do ZSbms ligados.
+   • Stock a acabar e subidas de preço (passo 5), só se houver.
+   • Por decidir: cada coisa com a razão, para o dono rever.
 ```

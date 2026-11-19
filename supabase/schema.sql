@@ -3946,3 +3946,48 @@ revoke all on function public.compras__doc_fila_gravar(integer, text, jsonb, tex
 revoke all on function public.compras__doc_fila_pausa(timestamptz, text) from public, anon, authenticated;
 revoke all on function public.compras__doc_fila_registo(jsonb) from public, anon, authenticated;
 revoke all on function public.compras__doc_fila_disparar() from public, anon, authenticated;
+
+-- Relatório do fim do dia (tarefa agendada às 22:57 de Lisboa, docs/tarefa-relatorio-dia.md): só lê.
+create or replace function public.compras_relatorio_dia(p_dia date default null)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare d date := coalesce(p_dia, (now() at time zone 'Europe/Lisbon')::date);
+  hoje boolean := coalesce(p_dia, (now() at time zone 'Europe/Lisbon')::date) = (now() at time zone 'Europe/Lisbon')::date;
+  r jsonb;
+begin
+  select jsonb_build_object(
+    'dia', d,
+    'faturas_antigas', (
+      select jsonb_build_object(
+        'lidas_no_dia', count(*) filter (where (f.lida_em at time zone 'Europe/Lisbon')::date = d),
+        'lidas_no_dia_sem_bater', count(*) filter (where (f.lida_em at time zone 'Europe/Lisbon')::date = d and f.resultado->'conferencia'->>'bate' = 'false'),
+        'lidas_total', count(*) filter (where f.estado in ('lida', 'tratada')),
+        'por_ler', count(*) filter (where f.estado in ('pendente', 'a_ler')),
+        'com_erro', count(*) filter (where f.estado = 'erro'),
+        'sem_documento', count(*) filter (where f.estado = 'sem_documento'),
+        'total', count(*),
+        'ultima_leitura', max(f.lida_em),
+        'por_fornecedor_no_dia', (select coalesce(jsonb_object_agg(x.fornecedor, x.n), '{}'::jsonb) from (
+            select g.fornecedor, count(*) n from public.compras_guara_doc_fila g
+             where (g.lida_em at time zone 'Europe/Lisbon')::date = d group by 1 order by 2 desc limit 10) x),
+        'pausa_ate', (select e.pausa_ate from public.compras_guara_doc_estado e),
+        'motivo_pausa', (select e.motivo from public.compras_guara_doc_estado e),
+        'leitura_automatica_ligada', exists (select 1 from cron.job j where j.jobname = 'compras-guara-doc-fila' and j.active))
+      from public.compras_guara_doc_fila f),
+    'faturas_novas_guara', (
+      select jsonb_build_object(
+        'recebidas_no_dia', count(*),
+        'por_estado', coalesce(jsonb_object_agg(x.estado, x.n) filter (where x.estado is not null), '{}'::jsonb),
+        'importadas', (select coalesce(jsonb_agg(jsonb_build_object('fornecedor', g.fornecedor, 'numero', g.numero, 'data', g.data, 'total', g.total) order by g.data), '[]'::jsonb)
+                         from public.compras_guara_faturas g where (g.criado_em at time zone 'Europe/Lisbon')::date = d and g.estado = 'importada'),
+        'pendentes_agora', (select count(*) from public.compras_guara_faturas g where g.estado = 'pendente'))
+      from (select g.estado, count(*) n from public.compras_guara_faturas g where (g.criado_em at time zone 'Europe/Lisbon')::date = d group by 1) x),
+    'artigos_antigos', jsonb_build_object(
+      'ligados_no_dia', (select count(*) from public.compras_antigas_decisoes a where (a.decidido_em at time zone 'Europe/Lisbon')::date = d and not a.ignorar),
+      'ignorados_no_dia', (select count(*) from public.compras_antigas_decisoes a where (a.decidido_em at time zone 'Europe/Lisbon')::date = d and a.ignorar),
+      'faltam_ligar', case when hoje then (select count(*) from public.compras_antigas_por_ligar()) end),
+    'agente_da_manha', (select jsonb_build_object('correu_em', c.correspondencia_em, 'resultado', c.correspondencia) from public.compras_guara_cfg c limit 1),
+    'importacoes', (select jsonb_build_object('faturas_em', c.faturas_em, 'faturas_ok', c.faturas->'ok', 'receitas_em', c.receitas_em, 'receitas_ok', c.receitas->'ok') from public.compras_guara_cfg c limit 1)
+  ) into r;
+  return r;
+end $$;
+revoke all on function public.compras_relatorio_dia(date) from public, anon, authenticated;
