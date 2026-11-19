@@ -3726,3 +3726,28 @@ revoke all on function public.compras__doc_fila_gravar(integer, text, jsonb, tex
 revoke all on function public.compras__doc_fila_pausa(timestamptz, text) from public, anon, authenticated;
 revoke all on function public.compras__doc_fila_registo(jsonb) from public, anon, authenticated;
 revoke all on function public.compras__doc_fila_disparar() from public, anon, authenticated;
+
+-- Artigos das faturas antigas (jan–ago): preço final por linha, artigos por ligar, ligar a produto (sem faturas nem stock)
+create or replace function public.compras__num(p text)
+returns numeric language plpgsql immutable as $$
+declare t text := regexp_replace(coalesce(p, ''), '[^0-9,.\-]', '', 'g');
+begin
+  if t = '' or t = '-' then return null; end if;
+  if t like '%,%' then t := replace(replace(t, '.', ''), ',', '.'); end if;
+  return t::numeric;
+exception when others then return null;
+end $$;
+
+create table if not exists public.compras_antigas_decisoes (
+  supplier_id uuid not null references public.compras_suppliers(id) on delete cascade,
+  chave text not null,
+  descricao text not null,
+  product_id uuid references public.compras_products(id) on delete set null,
+  ignorar boolean not null default false,
+  motivo text,
+  decidido_em timestamptz not null default now(),
+  primary key (supplier_id, chave)
+);
+alter table public.compras_antigas_decisoes enable row level security;
+-- compras__antigas_linhas(), compras_antigas_por_ligar(), compras__antigas_ligar(fornecedor, descricao, produto, nome, unidade,
+-- categoria, pack) e compras__antigas_ignorar(fornecedor, descricao, motivo): ver a migration compras_faturas_antigas_artigos.

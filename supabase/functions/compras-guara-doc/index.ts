@@ -3,7 +3,7 @@
 // Só aceita pedidos com x-zs-key = compras_zs_cfg.chave.
 // { "guara_id": 21702 }  devolve as linhas como estão no papel (preço unitário, desconto, IEC, IVA e valor da linha).
 // { "fila": true }       lê as faturas antigas de compras_guara_doc_fila (as mais recentes primeiro), uma a uma, durante
-//   ~80 s, e grava o que leu na fila. Quando a Gemini diz que o limite acabou, para e marca uma pausa
+//   ~20 s (normalmente uma por chamada), e grava o que leu na fila. Quando a Gemini diz que o limite acabou, para e marca uma pausa
 //   (compras_guara_doc_estado.pausa_ate); o pg_cron (compras__doc_fila_disparar) volta a chamar quando a pausa passar.
 const BASE = "https://guara.pt";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
@@ -71,12 +71,6 @@ class Sessao {
   }
 }
 
-function base64(buf: Uint8Array) {
-  let bin = "";
-  for (let j = 0; j < buf.length; j += 0x8000) bin += String.fromCharCode(...buf.subarray(j, j + 0x8000));
-  return btoa(bin);
-}
-
 const PROMPT = `Estas imagens são as páginas de um documento de compra (fatura, nota de crédito ou talão) de um fornecedor de um restaurante em Portugal.
 Transcreve TODAS as linhas de artigos exatamente como estão impressas (não calcules nada que não esteja escrito).
 Responde só com JSON neste formato:
@@ -110,20 +104,41 @@ function pausaDe(j: any): { ate: Date; motivo: string } {
   return { ate: new Date(Date.now() + Math.max(60, atraso + 5) * 1000), motivo: "limite " + (quota || j?.error?.status || "429") };
 }
 
-// Imagens grandes (as páginas do Guará são PNG de ~7 MB) vão pela API de ficheiros da Gemini quando o pedido passaria dos 20 MB
+// As páginas do Guará são PNG de ~7 MB: vão para a API de ficheiros da Gemini (envio resumível), uma a uma, sem base64,
+// para a função não ficar sem memória nem CPU. Os ficheiros apagam-se no fim (e sozinhos ao fim de 48 h).
 async function carregarFicheiro(buf: Uint8Array, tipo: string) {
   const k = Deno.env.get("GEMINI_API_KEY")!;
-  const fd = new FormData();
-  fd.append("metadata", new Blob([JSON.stringify({ file: { display_name: "pagina" } })], { type: "application/json" }));
-  fd.append("file", new Blob([buf], { type: tipo }));
-  const r = await fetch(`${GEM}/upload/v1beta/files?uploadType=multipart`, { method: "POST", headers: { "x-goog-api-key": k }, body: fd });
+  const ini = await fetch(`${GEM}/upload/v1beta/files`, { method: "POST", headers: {
+    "x-goog-api-key": k, "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
+    "X-Goog-Upload-Header-Content-Length": String(buf.length), "X-Goog-Upload-Header-Content-Type": tipo, "Content-Type": "application/json" },
+    body: JSON.stringify({ file: { display_name: "pagina" } }) });
+  if (ini.status === 429) { const p = pausaDe(await ini.json().catch(() => null)); throw new LimiteIA(p.ate, p.motivo); }
+  const url = ini.headers.get("x-goog-upload-url");
+  await ini.body?.cancel();
+  if (!ini.ok || !url) throw new Error("gemini_ficheiro_" + ini.status);
+  const r = await fetch(url, { method: "POST", headers: { "Content-Length": String(buf.length), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: buf });
   const j = await r.json().catch(() => null);
   if (r.status === 429) { const p = pausaDe(j); throw new LimiteIA(p.ate, p.motivo); }
   if (!r.ok || !j?.file?.uri) throw new Error("gemini_ficheiro_" + r.status);
   return { uri: j.file.uri as string, name: j.file.name as string };
 }
 async function apagarFicheiro(name: string) {
-  try { await fetch(`${GEM}/v1beta/${name}`, { method: "DELETE", headers: { "x-goog-api-key": Deno.env.get("GEMINI_API_KEY")! } }); } catch (_e) { /* apaga-se sozinho em 48 h */ }
+  try { const r = await fetch(`${GEM}/v1beta/${name}`, { method: "DELETE", headers: { "x-goog-api-key": Deno.env.get("GEMINI_API_KEY")! } }); await r.body?.cancel(); } catch (_e) { /* apaga-se sozinho em 48 h */ }
+}
+
+// A soma das linhas (sem IVA, ou com IVA quando os preços vêm com IVA) deve bater com o total do documento (±3%,
+// descontando o desconto global); quando não bate, a leitura fica marcada e tenta-se outro modelo
+const nume = (v: unknown) => { const n = Number(String(v ?? "").replace(",", ".")); return Number.isFinite(n) ? n : 0; };
+function conferir(d: any) {
+  const linhas: any[] = Array.isArray(d?.linhas) ? d.linhas : [];
+  const soma = Math.round(linhas.reduce((a, l) => a + (nume(l?.valor_total) || nume(l?.quantidade) * nume(l?.preco_unitario) * (1 - nume(l?.desconto_pct) / 100)), 0) * 100) / 100;
+  const comIva = d?.precos_com_iva === true;
+  const alvo = comIva ? nume(d?.total_com_iva) : nume(d?.total_sem_iva) + (nume(d?.desconto_global) > 0 && !comIva ? nume(d?.desconto_global) : 0);
+  const alvo2 = comIva ? 0 : nume(d?.total_sem_iva);
+  if (!alvo || !linhas.length) return { soma, alvo, dif_pct: 0, bate: null as boolean | null };
+  const dif = (soma - alvo) / Math.abs(alvo) * 100, dif2 = alvo2 ? (soma - alvo2) / Math.abs(alvo2) * 100 : dif;
+  const melhor = Math.abs(dif) <= Math.abs(dif2) ? dif : dif2;
+  return { soma, alvo, dif_pct: Math.round(melhor * 10) / 10, bate: Math.abs(melhor) <= 3 };
 }
 
 // Lê um documento do Guará com a Gemini. Devolve { ok, modelo, paginas, documento } ou { ok:false, erro }.
@@ -133,55 +148,59 @@ async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido
   const html = await det.text();
   const docs = [...new Set([...html.matchAll(/\/documents\/(\d+)\/pages\/\d+/g)].map((m) => m[1]))];
   if (!docs.length) return { ok: false, erro: "sem_documento", status: det.status };
-  const imagens: { tipo: string; buf: Uint8Array }[] = [];
   const paginas: unknown[] = [];
-  for (const d of docs) {
-    for (let p = 1; p <= Math.min(maxPag, 6); p++) {
-      const r = await s.get(`/documents/${d}/pages/${p}`, "image/*,application/pdf,*/*");
-      const tipo = (r.headers.get("content-type") || "").split(";")[0];
-      const buf = new Uint8Array(await r.arrayBuffer());
-      paginas.push({ documento: d, pagina: p, status: r.status, tipo, tamanho: buf.length });
-      if (r.status !== 200 || !/^image\/|^application\/pdf/.test(tipo)) break;
-      imagens.push({ tipo, buf });
-    }
-  }
-  if (!imagens.length) return { ok: false, erro: "sem_imagens", paginas };
-  const total = imagens.reduce((a, x) => a + x.buf.length, 0);
+  const partes: unknown[] = [];
   const ficheiros: string[] = [];
   try {
-    let partes: unknown[];
-    if (total <= 13_000_000) partes = imagens.map((im) => ({ inline_data: { mime_type: im.tipo, data: base64(im.buf) } }));
-    else {
-      partes = [];
-      for (const im of imagens) { const f = await carregarFicheiro(im.buf, im.tipo); ficheiros.push(f.name); partes.push({ file_data: { mime_type: im.tipo, file_uri: f.uri } }); }
+    for (const d of docs) {
+      for (let p = 1; p <= Math.min(maxPag, 6); p++) {
+        const r = await s.get(`/documents/${d}/pages/${p}`, "image/*,application/pdf,*/*");
+        const tipo = (r.headers.get("content-type") || "").split(";")[0];
+        if (r.status !== 200 || !/^image\/|^application\/pdf/.test(tipo)) { paginas.push({ documento: d, pagina: p, status: r.status, tipo }); await r.body?.cancel(); break; }
+        const buf = new Uint8Array(await r.arrayBuffer());
+        paginas.push({ documento: d, pagina: p, status: r.status, tipo, tamanho: buf.length });
+        const f = await carregarFicheiro(buf, tipo);
+        ficheiros.push(f.name);
+        partes.push({ file_data: { mime_type: tipo, file_uri: f.uri } });
+      }
     }
+    if (!partes.length) return { ok: false, erro: "sem_imagens", paginas };
     const modelos = [...new Set([modeloPedido || "gemini-flash-latest", "gemini-flash-lite-latest"])].filter((m) => !esgotados.has(m));
     let erro = "", limite: { ate: Date; motivo: string } | null = null;
+    const erros: string[] = [];
+    let fraco: any = null;
     for (const m of modelos) {
       let g: Response;
       try {
         g = await fetch(`${GEM}/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
           method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": Deno.env.get("GEMINI_API_KEY")! },
           body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: PROMPT }, ...partes] }], generationConfig: { temperature: 0, responseMimeType: "application/json" } }),
-          signal: AbortSignal.timeout(100_000) });
-      } catch (e) { erro = `${m}: ${(e as Error).name === "TimeoutError" ? "tempo_esgotado" : (e as Error).message}`; continue; }
+          signal: AbortSignal.timeout(170_000) });
+      } catch (e) { erro = `${m}: ${(e as Error).name === "TimeoutError" ? "tempo_esgotado" : (e as Error).message}`; erros.push(erro); continue; }
       const j = await g.json().catch(() => null);
-      if (g.status === 429) { esgotados.add(m); limite = pausaDe(j); erro = `${m}: 429`; continue; }
-      if (!g.ok) { erro = `${m}: ${g.status} ${String(j?.error?.message || "").slice(0, 120)}`; continue; }
+      if (g.status === 429) { esgotados.add(m); limite = pausaDe(j); erro = `${m}: 429`; erros.push(erro); continue; }
+      if (!g.ok) { erro = `${m}: ${g.status} ${String(j?.error?.message || "").slice(0, 160)}`; erros.push(erro); continue; }
       const t = (j?.candidates?.[0]?.content?.parts || []).map((x: any) => x.text || "").join("");
-      try { return { ok: true, modelo: m, paginas, documento: JSON.parse(t), uso: j?.usageMetadata }; }
-      catch (_e) { erro = `${m}: resposta_sem_json`; }
+      let documento: any;
+      try { documento = JSON.parse(t); } catch (_e) { erro = `${m}: resposta_sem_json`; erros.push(erro); continue; }
+      const conferencia = conferir(documento);
+      const r = { ok: true, modelo: m, paginas, documento, uso: j?.usageMetadata, conferencia, erros };
+      if (conferencia.bate !== false) return r;
+      // a soma das linhas não bate com o total: tenta o modelo seguinte e fica com o melhor
+      erros.push(`${m}: soma ${conferencia.soma} ≠ ${conferencia.alvo}`);
+      if (!fraco || Math.abs(conferencia.dif_pct) < Math.abs(fraco.conferencia.dif_pct)) fraco = r;
     }
+    if (fraco) return fraco;
     if (limite && modelos.every((m) => esgotados.has(m))) throw new LimiteIA(limite.ate, limite.motivo);
-    return { ok: false, erro, paginas };
+    return { ok: false, erro, erros, paginas };
   } finally {
     for (const n of ficheiros) await apagarFicheiro(n);
   }
 }
 
-// Lê faturas da fila durante ~80 s (não começa uma nova depois disso) e grava cada resultado
+// Lê faturas da fila (por defeito só começa uma nova nos primeiros 20 s, ou seja, uma por chamada) e grava cada resultado
 async function fila(b: any) {
-  const ini = Date.now(), lim = Math.min(Number(b?.max_seg) || 80, 200) * 1000;
+  const ini = Date.now(), lim = Math.min(Number(b?.max_seg) || 20, 200) * 1000;
   const s = new Sessao();
   await s.entrar();
   const esgotados = new Set<string>();
@@ -194,9 +213,9 @@ async function fila(b: any) {
     const t0 = Date.now();
     try {
       const r: any = await lerDocumento(s, f.guara_id, 4, undefined, esgotados);
-      if (r.ok) await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: "lida", p_resultado: { documento: r.documento, paginas: r.paginas, uso: r.uso }, p_erro: null, p_modelo: r.modelo });
+      if (r.ok) await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: "lida", p_resultado: { documento: r.documento, paginas: r.paginas, uso: r.uso, conferencia: r.conferencia, erros: r.erros }, p_erro: null, p_modelo: r.modelo });
       else await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: /sem_documento|sem_imagens/.test(r.erro) ? "sem_documento" : "pendente", p_resultado: r.paginas ? { paginas: r.paginas } : null, p_erro: r.erro, p_modelo: null });
-      feitas.push({ guara_id: f.guara_id, ok: r.ok, modelo: r.modelo, erro: r.erro, seg: Math.round((Date.now() - t0) / 1000) });
+      feitas.push({ guara_id: f.guara_id, ok: r.ok, modelo: r.modelo, bate: r.conferencia?.bate, erro: r.erro, seg: Math.round((Date.now() - t0) / 1000) });
     } catch (e) {
       if (e instanceof LimiteIA) {
         await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: "pendente_limite", p_resultado: null, p_erro: e.motivo, p_modelo: null });
