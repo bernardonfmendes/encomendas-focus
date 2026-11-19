@@ -57,7 +57,7 @@ class Sessao {
     let url = BASE + path;
     for (let i = 0; i < 6; i++) {
       const dentro = new URL(url).origin === BASE;
-      const r = await fetch(url, { headers: dentro ? this.cab(accept ? { Accept: accept } : {}) : { "User-Agent": UA }, redirect: "manual" });
+      const r = await fetch(url, { headers: dentro ? this.cab(accept ? { Accept: accept } : {}) : { "User-Agent": UA }, redirect: "manual", signal: AbortSignal.timeout(40_000) });
       if (dentro) this.guardar(r);
       const loc = r.headers.get("location");
       if (r.status >= 300 && r.status < 400 && loc) {
@@ -111,19 +111,19 @@ async function carregarFicheiro(buf: Uint8Array, tipo: string) {
   const ini = await fetch(`${GEM}/upload/v1beta/files`, { method: "POST", headers: {
     "x-goog-api-key": k, "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
     "X-Goog-Upload-Header-Content-Length": String(buf.length), "X-Goog-Upload-Header-Content-Type": tipo, "Content-Type": "application/json" },
-    body: JSON.stringify({ file: { display_name: "pagina" } }) });
+    body: JSON.stringify({ file: { display_name: "pagina" } }), signal: AbortSignal.timeout(20_000) });
   if (ini.status === 429) { const p = pausaDe(await ini.json().catch(() => null)); throw new LimiteIA(p.ate, p.motivo); }
   const url = ini.headers.get("x-goog-upload-url");
   await ini.body?.cancel();
   if (!ini.ok || !url) throw new Error("gemini_ficheiro_" + ini.status);
-  const r = await fetch(url, { method: "POST", headers: { "Content-Length": String(buf.length), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: buf });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Length": String(buf.length), "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize" }, body: buf, signal: AbortSignal.timeout(45_000) });
   const j = await r.json().catch(() => null);
   if (r.status === 429) { const p = pausaDe(j); throw new LimiteIA(p.ate, p.motivo); }
   if (!r.ok || !j?.file?.uri) throw new Error("gemini_ficheiro_" + r.status);
   return { uri: j.file.uri as string, name: j.file.name as string };
 }
 async function apagarFicheiro(name: string) {
-  try { const r = await fetch(`${GEM}/v1beta/${name}`, { method: "DELETE", headers: { "x-goog-api-key": Deno.env.get("GEMINI_API_KEY")! } }); await r.body?.cancel(); } catch (_e) { /* apaga-se sozinho em 48 h */ }
+  try { const r = await fetch(`${GEM}/v1beta/${name}`, { method: "DELETE", headers: { "x-goog-api-key": Deno.env.get("GEMINI_API_KEY")! }, signal: AbortSignal.timeout(5_000) }); await r.body?.cancel(); } catch (_e) { /* apaga-se sozinho em 48 h */ }
 }
 
 // A soma das linhas (sem IVA, ou com IVA quando os preços vêm com IVA) deve bater com o total do documento (±3%,
@@ -143,7 +143,9 @@ function conferir(d: any) {
 
 // Lê um documento do Guará com a Gemini. Devolve { ok, modelo, paginas, documento } ou { ok:false, erro }.
 // Lança LimiteIA quando todos os modelos estão sem quota.
-async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido?: string, esgotados = new Set<string>()) {
+// A função tem 150 s no máximo: tudo tem de acabar antes de "fim" (senão a fatura fica presa e nada se grava)
+async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido?: string, esgotados = new Set<string>(), fim = Date.now() + 135_000) {
+  const t0 = Date.now(), ms = () => Date.now() - t0;
   const det = await s.get(`/invoices/${gid}/detail`);
   const html = await det.text();
   const docs = [...new Set([...html.matchAll(/\/documents\/(\d+)\/pages\/\d+/g)].map((m) => m[1]))];
@@ -154,12 +156,14 @@ async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido
   try {
     for (const d of docs) {
       for (let p = 1; p <= Math.min(maxPag, 6); p++) {
+        if (fim - Date.now() < 70_000) { paginas.push({ documento: d, pagina: p, parou: "sem_tempo", ms: ms() }); break; }
         const r = await s.get(`/documents/${d}/pages/${p}`, "image/*,application/pdf,*/*");
         const tipo = (r.headers.get("content-type") || "").split(";")[0];
         if (r.status !== 200 || !/^image\/|^application\/pdf/.test(tipo)) { paginas.push({ documento: d, pagina: p, status: r.status, tipo }); await r.body?.cancel(); break; }
         const buf = new Uint8Array(await r.arrayBuffer());
-        paginas.push({ documento: d, pagina: p, status: r.status, tipo, tamanho: buf.length });
+        const desc = ms();
         const f = await carregarFicheiro(buf, tipo);
+        paginas.push({ documento: d, pagina: p, status: r.status, tipo, tamanho: buf.length, ms_guara: desc, ms_envio: ms() });
         ficheiros.push(f.name);
         partes.push({ file_data: { mime_type: tipo, file_uri: f.uri } });
       }
@@ -169,15 +173,24 @@ async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido
     let erro = "", limite: { ate: Date; motivo: string } | null = null;
     const erros: string[] = [];
     let fraco: any = null;
-    for (const m of modelos) {
-      let g: Response;
+    for (let i = 0; i < modelos.length; i++) {
+      const m = modelos[i];
+      const resta = fim - Date.now();
+      // o modelo principal deixa ~35 s para o seguinte; o último fica com o que sobra
+      const prazo = Math.min(i < modelos.length - 1 ? resta - 35_000 : resta - 3_000, 110_000);
+      if (prazo < 12_000) { erros.push(`${m}: sem_tempo`); continue; }
+      let g: Response, j: any = null;
       try {
-        g = await fetch(`${GEM}/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
+        // pensar pouco: é só transcrever, e assim responde mais depressa
+        const pedir = (pensar: boolean) => fetch(`${GEM}/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
           method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": Deno.env.get("GEMINI_API_KEY")! },
-          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: PROMPT }, ...partes] }], generationConfig: { temperature: 0, responseMimeType: "application/json" } }),
-          signal: AbortSignal.timeout(170_000) });
+          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: PROMPT }, ...partes] }],
+            generationConfig: { temperature: 0, responseMimeType: "application/json", ...(pensar ? { thinkingConfig: { thinkingLevel: "low" } } : {}) } }),
+          signal: AbortSignal.timeout(Math.max(5_000, Math.min(prazo, fim - Date.now() - 3_000))) });
+        g = await pedir(true);
+        j = await g.json().catch(() => null);
+        if (g.status === 400 && /thinking/i.test(String(j?.error?.message || ""))) { g = await pedir(false); j = await g.json().catch(() => null); }
       } catch (e) { erro = `${m}: ${(e as Error).name === "TimeoutError" ? "tempo_esgotado" : (e as Error).message}`; erros.push(erro); continue; }
-      const j = await g.json().catch(() => null);
       if (g.status === 429) { esgotados.add(m); limite = pausaDe(j); erro = `${m}: 429`; erros.push(erro); continue; }
       if (!g.ok) { erro = `${m}: ${g.status} ${String(j?.error?.message || "").slice(0, 160)}`; erros.push(erro); continue; }
       const t = (j?.candidates?.[0]?.content?.parts || []).map((x: any) => x.text || "").join("");
@@ -201,7 +214,8 @@ async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido
 
 // Lê faturas da fila (por defeito só começa uma nova nos primeiros 20 s, ou seja, uma por chamada) e grava cada resultado
 async function fila(b: any) {
-  const ini = Date.now(), lim = Math.min(Number(b?.max_seg) || 20, 200) * 1000;
+  // só começa outra fatura se ainda houver tempo para a ler inteira (a função é cortada aos 150 s)
+  const ini = Date.now(), lim = Math.min(Number(b?.max_seg) || 20, 30) * 1000;
   const s = new Sessao();
   await s.entrar();
   const esgotados = new Set<string>();
@@ -213,7 +227,7 @@ async function fila(b: any) {
     const f = prox[0];
     const t0 = Date.now();
     try {
-      const r: any = await lerDocumento(s, f.guara_id, 4, undefined, esgotados);
+      const r: any = await lerDocumento(s, f.guara_id, 4, undefined, esgotados, ini + 138_000);
       // leitura duvidosa (soma não bate ou só o "lite" respondeu): volta à fila para tentar mais tarde (até 4 vezes);
       // se o modelo principal estava sobrecarregado (503), pausa 3 minutos
       const duvidosa = r.ok && r.conferencia?.bate !== true && (r.conferencia?.bate === false || String(r.modelo).includes("lite"));

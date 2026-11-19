@@ -3889,3 +3889,60 @@ begin
 end $$;
 revoke all on function public.compras__doc_fila_disparar() from public, anon, authenticated;
 -- select cron.schedule('compras-guara-doc-fila', '* * * * *', 'select public.compras__doc_fila_disparar()');
+
+-- 19/11 (tarde): a função é cortada aos 150 s; "a ler" há mais de 4 min volta à fila; até 8 tentativas; um pedido de cada vez
+-- (compras__doc_fila_disparar espera 160 s); os updates de compras_guara_doc_estado levam "where id" (o PostgREST recusa UPDATE sem WHERE).
+create or replace function public.compras__doc_fila_proximas(p_n integer)
+returns setof public.compras_guara_doc_fila language plpgsql security definer set search_path = public as $$
+begin
+  update public.compras_guara_doc_fila set estado = 'pendente', a_ler_desde = null
+   where estado = 'a_ler' and a_ler_desde < now() - interval '4 minutes';
+  if (select pausa_ate from public.compras_guara_doc_estado) > now() then return; end if;
+  return query
+  update public.compras_guara_doc_fila f set estado = 'a_ler', a_ler_desde = now(), tentativas = f.tentativas + 1
+   where f.guara_id in (select guara_id from public.compras_guara_doc_fila where estado = 'pendente'
+                         order by data desc nulls last, guara_id desc limit greatest(1, least(p_n, 20)) for update skip locked)
+  returning f.*;
+end $$;
+create or replace function public.compras__doc_fila_gravar(p_guara_id integer, p_estado text, p_resultado jsonb, p_erro text, p_modelo text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  update public.compras_guara_doc_fila
+     set estado = case when p_estado = 'pendente_limite' then 'pendente'
+                       when p_estado = 'pendente' and tentativas >= 8 then 'erro' else p_estado end,
+         tentativas = case when p_estado = 'pendente_limite' then greatest(0, tentativas - 1) else tentativas end,
+         resultado = coalesce(p_resultado, resultado), erro = p_erro, modelo = coalesce(p_modelo, modelo),
+         a_ler_desde = null, lida_em = case when p_estado = 'lida' then now() else lida_em end
+   where guara_id = p_guara_id;
+end $$;
+create or replace function public.compras__doc_fila_pausa(p_ate timestamptz, p_motivo text)
+returns void language sql security definer set search_path = public as $$
+  update public.compras_guara_doc_estado set pausa_ate = p_ate, motivo = p_motivo, atualizado_em = now() where id;
+$$;
+create or replace function public.compras__doc_fila_registo(p_info jsonb)
+returns void language sql security definer set search_path = public as $$
+  update public.compras_guara_doc_estado set ultimo = p_info, atualizado_em = now() where id;
+$$;
+create or replace function public.compras__doc_fila_disparar()
+returns text language plpgsql security definer set search_path = public, extensions as $$
+declare n int;
+begin
+  select count(*) into n from public.compras_guara_doc_fila where estado in ('pendente','a_ler');
+  if n = 0 then
+    perform cron.unschedule('compras-guara-doc-fila');
+    return 'acabou';
+  end if;
+  if (select pausa_ate from public.compras_guara_doc_estado) > now() then return 'pausa'; end if;
+  if exists (select 1 from public.compras_guara_doc_fila where estado = 'a_ler' and a_ler_desde > now() - interval '160 seconds') then return 'a_ler'; end if;
+  perform net.http_post(
+    url := 'https://cckgrpmspyurgmbgtjdu.supabase.co/functions/v1/compras-guara-doc',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-zs-key', (select chave from public.compras_zs_cfg limit 1)),
+    body := jsonb_build_object('fila', true),
+    timeout_milliseconds := 200000);
+  return 'pedido';
+end $$;
+revoke all on function public.compras__doc_fila_proximas(integer) from public, anon, authenticated;
+revoke all on function public.compras__doc_fila_gravar(integer, text, jsonb, text, text) from public, anon, authenticated;
+revoke all on function public.compras__doc_fila_pausa(timestamptz, text) from public, anon, authenticated;
+revoke all on function public.compras__doc_fila_registo(jsonb) from public, anon, authenticated;
+revoke all on function public.compras__doc_fila_disparar() from public, anon, authenticated;
