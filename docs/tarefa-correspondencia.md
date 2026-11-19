@@ -20,6 +20,16 @@ Regras: usa só o conector Supabase (ferramentas mcp__Supabase__*, carrega-as co
      Não mudes "desc", "qty" nem "price". Importa com: select compras_guara_importar(guara_id, '<todas as linhas, em JSON>'::jsonb).
    - Regras confirmadas pelo dono: açúcar FRUSTOCK à caixa de 10 kg; açúcar Delta é "Açúcar em saquetas (café)", à caixa; Ebi Fry = 10 un; "Kimchi Sauce 1l" (molho, 1 L) e "Kimchi no Moto 1,2 kg" são produtos diferentes; tomate cherry ao kg; bolos da avó à unidade (só muda o sabor); Ama ebi é o produto "Ama ebi (camarão doce)".
 
+1b. Artigos das faturas antigas (janeiro a agosto de 2026). O Guará não tem as linhas destas faturas; são lidas no documento com a IA, em segundo plano, para compras_guara_doc_fila. Pedido do dono: entra só o produto e o preço final (sem IVA e com desconto), sem faturas nem stock. Até 80 por dia, os mais vistos primeiro:
+   select * from compras_antigas_por_ligar() order by vezes desc, ultima desc limit 80;
+   (preco = preço final sem IVA e com desconto por cada unidade da fatura; unidade = a da fatura: CX, KG, UN, EM...)
+   - Mesmo cuidado do passo 1: primeiro as descrições do mesmo fornecedor (compras__fornecedor('<fornecedor>'); se der null, o fornecedor ainda não está na app e é criado ao ligar), depois os produtos existentes e as ofertas de outros fornecedores; só então produto novo (nome curto e genérico, categoria e unidade como no passo 1). Nos documentos a FRUSTOCK aparece como "Bidfood Portugal": usa o nome do fornecedor da lista.
+   - Ligar: select compras__antigas_ligar('<fornecedor>', '<descricao>', '<product_id>'::uuid ou null, '<nome novo>' ou null, '<un|kg|L>' ou null, '<categoria>' ou null, <pack_qty>);
+     pack_qty como no passo 1 (quanto do produto vem em cada unidade da fatura; ex.: caixa de 6 garrafas de 1 L num produto em L = 6; artigo ao KG num produto ao kg = 1). Se o produto já tem preço mais recente nesse fornecedor, só fica a descrição; senão fica com este preço.
+   - Não é produto (portes, taxas, ecovalor, serviços, equipamento): select compras__antigas_ignorar('<fornecedor>', '<descricao>', '<motivo curto>').
+   - Na dúvida, não decidas (fica para o dia seguinte) e diz no resumo.
+   - Para o resumo: select estado, count(*) from compras_guara_doc_fila group by 1; select pausa_ate, motivo from compras_guara_doc_estado; select count(*) from compras_antigas_por_ligar().
+
 2. Ingredientes sem produto nas receitas que se vendem (as outras receitas do Guará, de outros menus, não interessam):
    with recursive arv(gid, depth) as (select distinct z.recipe_guara_id, 0 from compras_zs_items z where z.recipe_guara_id is not null and not z.ignorar union select i.sub_recipe_guara_id, a.depth + 1 from arv a join compras_recipes r on r.guara_id = a.gid join compras_recipe_items i on i.recipe_id = r.id where i.sub_recipe_guara_id is not null and a.depth < 8)
    select i.ingrediente, i.unidade, count(*) usos, string_agg(distinct r.nome, '; ') receitas from arv a join compras_recipes r on r.guara_id = a.gid join compras_recipe_items i on i.recipe_id = r.id where i.product_id is null and i.sub_recipe_guara_id is null and compras__norm(i.ingrediente) not in (select ingrediente from compras_ingredientes_sem_produto) group by 1, 2 order by 3 desc;
@@ -37,11 +47,11 @@ Regras: usa só o conector Supabase (ferramentas mcp__Supabase__*, carrega-as co
      * "@Repetição N peças" = receita 'local-media-sushi' com fator N.
    Grava só as decisões claras: update compras_zs_items set recipe_guara_id = ..., product_id = ..., fator = ..., ignorar = ..., pecas = ... (só sushi do all you can eat), revisto = true, atualizado_em = now() where codigo = ...; as outras deixa como estão e põe no resumo.
 
-4. Regista: select compras_guara_registo('correspondencia', '<JSON com: faturas_importadas, faturas_ignoradas, produtos_novos, ingredientes_ligados, ingredientes_sem_produto, artigos_zs_ligados, por_decidir>'::jsonb).
+4. Regista: select compras_guara_registo('correspondencia', '<JSON com: faturas_importadas, faturas_ignoradas, produtos_novos, ingredientes_ligados, ingredientes_sem_produto, artigos_zs_ligados, antigas_ligadas, antigas_ignoradas, por_decidir>'::jsonb).
 
 5. Para o resumo, consulta também:
    a) stock baixo (até 10): select p.nome, round(s.stock,2) stock, p.unidade, round(s.consumo_dia,2) consumo_dia from compras__stock_rows() s join compras_products p on p.id = s.product_id where s.consumo_dia > 0 and s.stock < s.consumo_dia * 3 order by s.stock / nullif(s.consumo_dia, 0) limit 10;
    b) subidas de preço de 5% ou mais nos últimos 2 dias: compras_offers com prev_unit_price > 0, unit_price >= prev_unit_price * 1.05 e data >= current_date - 2, com os nomes de compras_products e compras_suppliers (até 10).
 
-6. Resumo final (curto, em lista; é o que o dono recebe no telemóvel): faturas importadas (fornecedor, número e artigos novos com produto e embalagem escolhidos), produtos novos criados, ingredientes ligados, artigos do ZSbms ligados, e o que ficou por decidir com a razão, para o dono rever.
+6. Resumo final (curto, em lista; é o que o dono recebe no telemóvel): faturas importadas (fornecedor, número e artigos novos com produto e embalagem escolhidos), produtos novos criados, faturas antigas (lidas de 872, artigos ligados hoje e quantos faltam), ingredientes ligados, artigos do ZSbms ligados, e o que ficou por decidir com a razão, para o dono rever.
 ```

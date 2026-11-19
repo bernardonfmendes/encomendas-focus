@@ -185,7 +185,8 @@ async function lerDocumento(s: Sessao, gid: number, maxPag: number, modeloPedido
       try { documento = JSON.parse(t); } catch (_e) { erro = `${m}: resposta_sem_json`; erros.push(erro); continue; }
       const conferencia = conferir(documento);
       const r = { ok: true, modelo: m, paginas, documento, uso: j?.usageMetadata, conferencia, erros };
-      if (conferencia.bate !== false) return r;
+      // o modelo "lite" só conta quando a soma das linhas bate com o total (nas faturas grandes salta linhas)
+      if (conferencia.bate === true || (conferencia.bate === null && !m.includes("lite"))) return r;
       // a soma das linhas não bate com o total: tenta o modelo seguinte e fica com o melhor
       erros.push(`${m}: soma ${conferencia.soma} ≠ ${conferencia.alvo}`);
       if (!fraco || Math.abs(conferencia.dif_pct) < Math.abs(fraco.conferencia.dif_pct)) fraco = r;
@@ -213,6 +214,15 @@ async function fila(b: any) {
     const t0 = Date.now();
     try {
       const r: any = await lerDocumento(s, f.guara_id, 4, undefined, esgotados);
+      // leitura duvidosa (soma não bate ou só o "lite" respondeu): volta à fila para tentar mais tarde (até 4 vezes);
+      // se o modelo principal estava sobrecarregado (503), pausa 3 minutos
+      const duvidosa = r.ok && r.conferencia?.bate !== true && (r.conferencia?.bate === false || String(r.modelo).includes("lite"));
+      if (duvidosa && f.tentativas < 4) {
+        await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: "pendente", p_resultado: { documento: r.documento, paginas: r.paginas, conferencia: r.conferencia, erros: r.erros, provisoria: true }, p_erro: "leitura_duvidosa " + (r.erros || []).join(" | ").slice(0, 300), p_modelo: r.modelo });
+        feitas.push({ guara_id: f.guara_id, ok: false, duvidosa: true, erros: r.erros, seg: Math.round((Date.now() - t0) / 1000) });
+        if ((r.erros || []).some((e: string) => /: 503 /.test(e))) { await rpc("compras__doc_fila_pausa", { p_ate: new Date(Date.now() + 180_000).toISOString(), p_motivo: "modelo_sobrecarregado" }); pausa = "3min"; break; }
+        continue;
+      }
       if (r.ok) await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: "lida", p_resultado: { documento: r.documento, paginas: r.paginas, uso: r.uso, conferencia: r.conferencia, erros: r.erros }, p_erro: null, p_modelo: r.modelo });
       else await rpc("compras__doc_fila_gravar", { p_guara_id: f.guara_id, p_estado: /sem_documento|sem_imagens/.test(r.erro) ? "sem_documento" : "pendente", p_resultado: r.paginas ? { paginas: r.paginas } : null, p_erro: r.erro, p_modelo: null });
       feitas.push({ guara_id: f.guara_id, ok: r.ok, modelo: r.modelo, bate: r.conferencia?.bate, erro: r.erro, seg: Math.round((Date.now() - t0) / 1000) });

@@ -3749,5 +3749,143 @@ create table if not exists public.compras_antigas_decisoes (
   primary key (supplier_id, chave)
 );
 alter table public.compras_antigas_decisoes enable row level security;
--- compras__antigas_linhas(), compras_antigas_por_ligar(), compras__antigas_ligar(fornecedor, descricao, produto, nome, unidade,
--- categoria, pack) e compras__antigas_ignorar(fornecedor, descricao, motivo): ver a migration compras_faturas_antigas_artigos.
+
+-- Linhas das faturas antigas com o preço final sem IVA e com desconto (por embalagem da fatura): valor da linha ÷ quantidade;
+-- sem IVA quando as linhas vêm com IVA (talões, talho); desconto no fim do documento repartido pelos produtos (sem o vasilhame).
+create or replace function public.compras__antigas_linhas()
+returns table(guara_id integer, fornecedor text, supplier_id uuid, data date, numero text, ordem bigint, descricao text, codigo text,
+              quantidade numeric, unidade text, preco numeric, nota_credito boolean, conhecido uuid, conhecido_pack numeric)
+language sql stable security definer set search_path = public as $$
+  with d as (
+    select f.guara_id, f.fornecedor, f.numero, f.data, f.resultado->'documento' doc, public.compras__fornecedor(f.fornecedor) sid,
+           (coalesce(f.sem_iva, 0) < 0 or coalesce(f.resultado->'documento'->>'tipo_documento', '') ilike 'nota%' or f.numero ~* '^\s*N\.?C') nc
+      from public.compras_guara_doc_fila f where f.estado in ('lida', 'tratada') and f.resultado ? 'documento'),
+  l as (
+    select d.*, x.ord, trim(coalesce(x.l->>'descricao', '')) descr, trim(coalesce(x.l->>'codigo', '')) cod, trim(coalesce(x.l->>'unidade', '')) un,
+           public.compras__num(x.l->>'quantidade') q,
+           coalesce(nullif(public.compras__num(x.l->>'valor_total'), 0),
+                    public.compras__num(x.l->>'quantidade') * (coalesce(nullif(public.compras__num(x.l->>'preco_unitario_total'), 0), public.compras__num(x.l->>'preco_unitario'))
+                      * (1 - coalesce(public.compras__num(x.l->>'desconto_pct'), 0) / 100))) v,
+           nullif(public.compras__num(x.l->>'taxa_iva'), 0) iva
+      from d, jsonb_array_elements(case when jsonb_typeof(d.doc->'linhas') = 'array' then d.doc->'linhas' else '[]'::jsonb end) with ordinality x(l, ord)),
+  l2 as (
+    select l.*, (l.descr ~* '(vasilhame|cau[cç][aã]o|dep[oó]sito)' or l.descr ~* '(^|[^[:alnum:]])(vas|grade)([^[:alnum:]]|$)') vas,
+           public.compras__num(l.doc->>'total_sem_iva') tsi, public.compras__num(l.doc->>'total_com_iva') tci,
+           coalesce((l.doc->>'precos_com_iva')::text = 'true', false) pci
+      from l where l.descr <> '' and l.q is not null and l.q <> 0 and l.v is not null),
+  s as (select l2.guara_id, sum(l2.v) soma from l2 group by 1),
+  l3 as (
+    select l2.*, (l2.pci or (l2.tci > 0 and abs(s.soma - l2.tci) <= l2.tci * 0.01 and coalesce(l2.tsi, 0) < l2.tci * 0.995)) com_iva
+      from l2 join s on s.guara_id = l2.guara_id),
+  l4 as (
+    select l3.*, case when l3.com_iva then l3.v / (1 + coalesce(l3.iva, case when l3.tsi > 0 and l3.tci > l3.tsi then (l3.tci / l3.tsi - 1) * 100 else 23 end) / 100) else l3.v end vs
+      from l3),
+  t as (select l4.guara_id, sum(l4.vs) filter (where not l4.vas) prod, coalesce(sum(l4.vs) filter (where l4.vas), 0) vas_s, max(l4.tsi) tsi from l4 group by 1),
+  f as (select t.guara_id, case when t.tsi > 0 and t.prod > 0 and t.prod + t.vas_s > t.tsi * 1.005
+                                 and (t.tsi - t.vas_s) / t.prod between 0.4 and 0.995 then (t.tsi - t.vas_s) / t.prod else 1 end fator from t)
+  select l4.guara_id, l4.fornecedor, l4.sid, l4.data, l4.numero, l4.ord, l4.descr, l4.cod, l4.q, l4.un,
+         round(l4.vs * (case when l4.vas then 1 else f.fator end) / l4.q, 4), l4.nc, k.product_id, k.pack_qty
+    from l4 join f on f.guara_id = l4.guara_id
+    left join lateral (
+      select o.product_id, o.pack_qty from public.compras_offers o where o.supplier_id = l4.sid and lower(o.alias) = lower(l4.descr)
+      union all select a.product_id, a.pack_qty from public.compras_offer_aliases a where a.supplier_id = l4.sid and a.alias = lower(l4.descr)
+      union all select c.product_id, c.pack_qty from public.compras__artigo_chave(l4.sid, l4.descr) c
+      union all select dd.product_id, null from public.compras_antigas_decisoes dd where dd.supplier_id = l4.sid and dd.chave = public.compras__desc_chave(l4.descr) and dd.product_id is not null
+      limit 1) k on true
+$$;
+revoke all on function public.compras__antigas_linhas() from public, anon, authenticated;
+
+-- Artigos das faturas antigas que ainda não estão na app (nem decididos): um por fornecedor + descrição, com o último preço
+create or replace function public.compras_antigas_por_ligar()
+returns table(fornecedor text, supplier_id uuid, descricao text, codigo text, unidade text, vezes bigint, ultima date, quantidade numeric, preco numeric, guara_id integer)
+language sql stable security definer set search_path = public as $$
+  select distinct on (coalesce(l.supplier_id::text, l.fornecedor), public.compras__desc_chave(l.descricao))
+         l.fornecedor, l.supplier_id, l.descricao, l.codigo, l.unidade,
+         count(*) over (partition by coalesce(l.supplier_id::text, l.fornecedor), public.compras__desc_chave(l.descricao)),
+         l.data, l.quantidade, l.preco, l.guara_id
+    from public.compras__antigas_linhas() l
+   where l.conhecido is null and not l.nota_credito
+     and not exists (select 1 from public.compras_antigas_decisoes dd where dd.supplier_id = l.supplier_id and dd.chave = public.compras__desc_chave(l.descricao))
+   order by coalesce(l.supplier_id::text, l.fornecedor), public.compras__desc_chave(l.descricao), l.data desc, l.guara_id desc
+$$;
+revoke all on function public.compras_antigas_por_ligar() from public, anon, authenticated;
+
+-- Liga um artigo a um produto (existente, ou novo com nome/unidade/categoria) com o preço da fatura mais recente; sem faturas nem stock.
+-- Se o produto já tem oferta mais recente nesse fornecedor, só guarda a descrição (para reconhecer faturas futuras).
+create or replace function public.compras__antigas_ligar(p_fornecedor text, p_descricao text, p_produto uuid, p_nome text, p_unidade text, p_categoria text, p_pack numeric)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare sid uuid; pid uuid := p_produto; ult record; o public.compras_offers; acao text;
+begin
+  if coalesce(p_pack, 0) <= 0 then raise exception 'pack_invalido'; end if;
+  sid := public.compras__fornecedor(p_fornecedor);
+  if sid is null then
+    insert into public.compras_suppliers (nome) values (trim(p_fornecedor)) returning id into sid;
+  end if;
+  select l.* into ult from public.compras__antigas_linhas() l
+   where (l.supplier_id = sid or l.fornecedor = p_fornecedor) and public.compras__desc_chave(l.descricao) = public.compras__desc_chave(p_descricao) and not l.nota_credito
+   order by l.data desc, l.guara_id desc limit 1;
+  if not found then raise exception 'artigo_nao_encontrado'; end if;
+  if pid is null then
+    if coalesce(trim(p_nome), '') = '' then raise exception 'nome_obrigatorio'; end if;
+    if p_unidade not in ('kg', 'L', 'un') then raise exception 'unidade_invalida'; end if;
+    select id into pid from public.compras_products where lower(nome) = lower(trim(p_nome)) limit 1;
+    if pid is null then
+      insert into public.compras_products (nome, unidade, categoria) values (trim(p_nome), p_unidade, coalesce(nullif(trim(p_categoria), ''), 'Outros')) returning id into pid;
+    end if;
+  end if;
+  select * into o from public.compras_offers where product_id = pid and supplier_id = sid;
+  if not found then
+    insert into public.compras_offers (product_id, supplier_id, alias, codigo, pack_qty, pack_price, unit_price, data)
+    values (pid, sid, ult.descricao, coalesce(ult.codigo, ''), p_pack, ult.preco, round(ult.preco / p_pack, 6), ult.data);
+    acao := 'oferta_nova';
+  elsif o.data is null or o.data < ult.data then
+    update public.compras_offers set alias = ult.descricao, codigo = coalesce(ult.codigo, ''), pack_qty = p_pack, pack_price = ult.preco,
+           unit_price = round(ult.preco / p_pack, 6), prev_unit_price = o.unit_price, prev_data = o.data, data = ult.data
+     where product_id = pid and supplier_id = sid;
+    acao := 'oferta_atualizada';
+  else
+    acao := 'so_descricao';
+  end if;
+  insert into public.compras_offer_aliases (supplier_id, alias, product_id, pack_qty, origem)
+  values (sid, lower(ult.descricao), pid, p_pack, 'faturas_antigas') on conflict (supplier_id, alias) do nothing;
+  insert into public.compras_antigas_decisoes (supplier_id, chave, descricao, product_id)
+  values (sid, public.compras__desc_chave(ult.descricao), ult.descricao, pid)
+  on conflict (supplier_id, chave) do update set product_id = excluded.product_id, ignorar = false, decidido_em = now();
+  return jsonb_build_object('produto', pid, 'fornecedor', sid, 'acao', acao, 'preco', ult.preco, 'data', ult.data);
+end $$;
+revoke all on function public.compras__antigas_ligar(text, text, uuid, text, text, text, numeric) from public, anon, authenticated;
+
+-- Artigo que não é produto (transporte, serviço, taxa...): fica de fora
+create or replace function public.compras__antigas_ignorar(p_fornecedor text, p_descricao text, p_motivo text)
+returns void language plpgsql security definer set search_path = public as $$
+declare sid uuid;
+begin
+  sid := public.compras__fornecedor(p_fornecedor);
+  if sid is null then insert into public.compras_suppliers (nome) values (trim(p_fornecedor)) returning id into sid; end if;
+  insert into public.compras_antigas_decisoes (supplier_id, chave, descricao, ignorar, motivo)
+  values (sid, public.compras__desc_chave(p_descricao), p_descricao, true, p_motivo)
+  on conflict (supplier_id, chave) do update set ignorar = true, product_id = null, motivo = excluded.motivo, decidido_em = now();
+end $$;
+revoke all on function public.compras__antigas_ignorar(text, text, text) from public, anon, authenticated;
+
+-- disparar: uma de cada vez (a anterior pode demorar até ~5 min); pg_cron a cada minuto até a fila acabar
+create or replace function public.compras__doc_fila_disparar()
+returns text language plpgsql security definer set search_path = public, extensions as $$
+declare n int;
+begin
+  select count(*) into n from public.compras_guara_doc_fila where estado in ('pendente','a_ler');
+  if n = 0 then
+    perform cron.unschedule('compras-guara-doc-fila');
+    return 'acabou';
+  end if;
+  if (select pausa_ate from public.compras_guara_doc_estado) > now() then return 'pausa'; end if;
+  if exists (select 1 from public.compras_guara_doc_fila where estado = 'a_ler' and a_ler_desde > now() - interval '7 minutes') then return 'a_ler'; end if;
+  perform net.http_post(
+    url := 'https://cckgrpmspyurgmbgtjdu.supabase.co/functions/v1/compras-guara-doc',
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-zs-key', (select chave from public.compras_zs_cfg limit 1)),
+    body := jsonb_build_object('fila', true),
+    timeout_milliseconds := 400000);
+  return 'pedido';
+end $$;
+revoke all on function public.compras__doc_fila_disparar() from public, anon, authenticated;
+-- select cron.schedule('compras-guara-doc-fila', '* * * * *', 'select public.compras__doc_fila_disparar()');
