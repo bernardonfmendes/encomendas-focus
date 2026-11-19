@@ -132,13 +132,12 @@ const nume = (v: unknown) => { const n = Number(String(v ?? "").replace(",", "."
 function conferir(d: any) {
   const linhas: any[] = Array.isArray(d?.linhas) ? d.linhas : [];
   const soma = Math.round(linhas.reduce((a, l) => a + (nume(l?.valor_total) || nume(l?.quantidade) * nume(l?.preco_unitario) * (1 - nume(l?.desconto_pct) / 100)), 0) * 100) / 100;
-  const comIva = d?.precos_com_iva === true;
-  const alvo = comIva ? nume(d?.total_com_iva) : nume(d?.total_sem_iva) + (nume(d?.desconto_global) > 0 && !comIva ? nume(d?.desconto_global) : 0);
-  const alvo2 = comIva ? 0 : nume(d?.total_sem_iva);
-  if (!alvo || !linhas.length) return { soma, alvo, dif_pct: 0, bate: null as boolean | null };
-  const dif = (soma - alvo) / Math.abs(alvo) * 100, dif2 = alvo2 ? (soma - alvo2) / Math.abs(alvo2) * 100 : dif;
-  const melhor = Math.abs(dif) <= Math.abs(dif2) ? dif : dif2;
-  return { soma, alvo, dif_pct: Math.round(melhor * 10) / 10, bate: Math.abs(melhor) <= 3 };
+  // a soma pode bater com o total sem IVA, com o total sem IVA antes do desconto global, ou com o total com IVA (talões, talho)
+  const alvos = [nume(d?.total_sem_iva), nume(d?.total_sem_iva) + Math.max(0, nume(d?.desconto_global)), nume(d?.total_com_iva)].filter((x) => x);
+  if (!alvos.length || !linhas.length) return { soma, alvo: 0, dif_pct: 0, bate: null as boolean | null };
+  const difs = alvos.map((a) => (soma - a) / Math.abs(a) * 100);
+  const i = difs.reduce((m, x, k) => Math.abs(x) < Math.abs(difs[m]) ? k : m, 0);
+  return { soma, alvo: Math.round(alvos[i] * 100) / 100, dif_pct: Math.round(difs[i] * 10) / 10, bate: Math.abs(difs[i]) <= 3 };
 }
 
 // Lê um documento do Guará com a Gemini. Devolve { ok, modelo, paginas, documento } ou { ok:false, erro }.
