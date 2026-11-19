@@ -204,7 +204,7 @@ input,select,textarea{font-size:16px!important}
 .srow2{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--line)}.srow2:first-child{border-top:0}
 .srow2 .sn{flex:1;min-width:0}.srow2 .sn b{display:block;font-weight:600;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.srow2 .sn small{color:var(--muted)}
 .srow2 .sq{font-variant-numeric:tabular-nums;font-weight:700;text-align:right;white-space:nowrap}.srow2 .sq.neg{color:var(--bad)}.srow2 .sq.low{color:var(--warn)}
-.cin{width:92px;text-align:right;font-variant-numeric:tabular-nums}.cin.done{background:var(--good-soft);border-color:var(--good)}
+.cin{width:72px;text-align:right;font-variant-numeric:tabular-nums}.cadd{display:flex;align-items:center;gap:6px;flex:none}.ctot{min-width:44px;text-align:right;font-variant-numeric:tabular-nums;font-weight:700;color:var(--muted)}.ctot.done{color:var(--good)}.cund{width:36px;height:36px;padding:0;border-radius:10px;font-size:17px;flex:none}.cund[hidden]{display:none}
 .cnthd{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:12px 2px 6px;font-weight:700}
 .habh{margin:14px 0 8px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .pbar{height:7px;border-radius:99px;background:var(--line);overflow:hidden}
@@ -283,7 +283,6 @@ const shortSup = n => { const s = String(n || "").split(/\s[-–]\s|,/)[0].repla
 const unitInfo = (pq, bu, pp) => Number(pq) !== 1 ? `${packLabel(pq, bu || "un")} · ${eur(pp)}` : `${eur(pp)}/${bu || "un"}`;
 const setorNome = k => (SETORES.find(x => x[0] === k) || [null, ""])[1];
 // na contagem há também o armazém (não é um sítio de encomenda)
-const CONT_SETORES = SETORES.concat([["armazem", "Armazém"]]);
 // forma de contar: garrafas de 0,7 L, barris de 50 L, un, kg... (vem do catálogo; fator = unidades do produto por cada uma)
 const contarOf = p => (p && p.contar && Number(p.contar.fator) > 0) ? {em:p.contar.em, fator:Number(p.contar.fator)} : {em:(p && p.unidade) || "un", fator:1};
 const PLURAL_CONT = {garrafa:"garrafas", barril:"barris", lata:"latas", embalagem:"embalagens", pacote:"pacotes", caixa:"caixas", garrafao:"garrafões"};
@@ -339,7 +338,7 @@ const S = {
   token: ls.get("cf_token", null), me:null, products:[], suppliers:[], orders:[], pend:0,
   view:"encomendar", search:"", cat:"", cart: ls.get("cf_cart", {}), cartForma: ls.get("cf_cart_forma", {}),
   edits:{}, deliv:{}, files:[], previews:[], reading:null, readMsg:"", review:null, saving:false,
-  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", fatTab:null, fatF:"todos", renaming:null, stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", countSetor:null, confirmClose:false, confirmCancel:false, note:"", gq:"", confirmCancelOrd:null, showDiff:false
+  users:[], invoices:[], confirmDel:null, pinForm:false, drafts:[], queueing:false, setor:"cozinha", todos:false, sup:"", supOpen:false, pop:null, undo:null, offline:false, openOrd:{}, push:"off", rejecting:null, rejText:"", fatTab:null, fatF:"todos", renaming:null, stock:null, stockById:{}, stockQ:"", stockF:"todos", count:null, counting:false, countQ:"", confirmClose:false, confirmCancel:false, note:"", gq:"", confirmCancelOrd:null, showDiff:false
 };
 const inSite = p => !(p.setores || []).length || p.setores.includes(S.setor);
 const isChefe = () => S.me && S.me.role === "chefe";
@@ -768,7 +767,7 @@ function viewStock(){
   if (S.counting && S.count && S.count.aberta) return viewCount();
   const ab = S.count && S.count.aberta; const ult = S.count && S.count.ultima;
   let h = `<h2 style="margin-bottom:4px">Stock</h2><p class="lead">Faturas que entraram menos o que se gastou nas vendas (receitas do Guará).${st.vendas_ate ? ` Vendas até ${fmtDate(st.vendas_ate)}.` : " Ainda sem vendas importadas."}</p>`;
-  if (ab) h += `<div class="banner row" style="justify-content:space-between;margin-bottom:12px"><span>Contagem a decorrer desde ${fmtDate(ab.data)} · ${(ab.linhas || []).length} registos</span><button class="small primary" data-action="count-go">Contar</button></div>`;
+  if (ab) h += `<div class="banner row" style="justify-content:space-between;margin-bottom:12px"><span>Contagem a decorrer desde ${fmtDate(ab.data)} · ${new Set((ab.linhas || []).map(l => l.product_id)).size} produtos contados</span><button class="small primary" data-action="count-go">Contar</button></div>`;
   else h += `<div class="row" style="margin-bottom:12px"><button class="primary" data-action="count-start">Começar contagem</button><small class="muted">${isChefe() ? "Uma vez por mês, tudo de uma vez: de manhã antes de abrir ou à noite depois de fechar, em todos os sítios e no armazém. Cada pessoa conta um sítio." : "Qualquer pessoa pode começar e contar. O chefe fecha a contagem no fim."}</small></div>`;
   if (ult && ult.resultado && ult.resultado.length) {
     const diffs = ult.resultado.map(r => ({...r, p:prodById(r.product_id), d:(Number(r.contado)||0) - (Number(r.esperado)||0)})).filter(r => r.p && Math.abs(r.d) > 0.0005).sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
@@ -796,30 +795,42 @@ function viewStock(){
   }
   return h + (open ? `</div>` : "") + `</div><p class="muted" style="margin-top:10px"><small>Começou a zero em ${fmtDate(st.inicio)}. Até à primeira contagem, o stock que já estava nas prateleiras não aparece.</small></p>`;
 }
-// valor contado como se escreveu (garrafas, barris...); as linhas antigas só têm a quantidade na unidade do produto
-function countVal(pid, setor){ const l = ((S.count && S.count.aberta && S.count.aberta.linhas) || []).find(x => x.product_id === pid && x.setor === setor);
-  return l ? (l.contado != null ? Number(l.contado) : Number(l.qty) / (Number(l.fator) || 1)) : null; }
+// o que já se contou de um produto, na forma de contar (garrafas, barris...): cada soma é uma parcela
+function countParts(pid){
+  const f = contarOf(prodById(pid)).fator;
+  return ((S.count && S.count.aberta && S.count.aberta.linhas) || []).filter(x => x.product_id === pid)
+    .flatMap(l => Array.isArray(l.parcelas) && l.parcelas.length ? l.parcelas.map(Number) : [l.contado != null && Number(l.fator || 1) === f ? Number(l.contado) : Number(l.qty) / f]);
+}
+const somaParts = ps => Math.round(ps.reduce((a, b) => a + b, 0) * 1000) / 1000;
+function countRowInfo(p){
+  const ps = countParts(p.id), f = contarOf(p).fator;
+  if (!ps.length) return `em ${esc(contarTxt(p))}`;
+  const t = somaParts(ps);
+  const soma = ps.length > 1 ? esc(ps.map(x => num(x, 3)).join(" + ")) : "", lt = f !== 1 ? `= ${esc(qFmt(t * f, p.unidade))}` : "";
+  return `${[soma, lt].filter(Boolean).join(" ")}${soma || lt ? " · " : ""}em ${esc(contarTxt(p))}`;
+}
 function viewCount(){
-  const ab = S.count.aberta; const setor = S.countSetor || S.setor;
-  const nomeS = (CONT_SETORES.find(x => x[0] === setor) || [0, ""])[1];
+  const ab = S.count.aberta;
+  const contados = new Set((ab.linhas || []).map(l => l.product_id)).size;
   let h = `<div class="row" style="justify-content:space-between;margin-bottom:6px"><h2>Contagem</h2><button class="small" data-action="count-back">Voltar</button></div>
-    <p class="lead">Escreva quanto há de cada produto em ${esc(nomeS)}. Bebidas e embalados contam-se às unidades (garrafas, barris, latas); uma garrafa aberta conta a parte que tem: <b>1,5</b> = uma cheia e meia. Comida a granel ao kg. Grava sozinho; deixe vazio o que não contou.</p>
-    <div class="seg" id="countbar" role="group" aria-label="Sítio" style="display:grid;grid-template-columns:repeat(5,1fr);gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:3px;margin-bottom:8px">${CONT_SETORES.map(([k, n]) => { const c = (ab.linhas || []).filter(l => l.setor === k).length; return `<button class="chip" style="border:0;border-radius:9px;justify-content:center;padding:4px 2px;font-size:13px;${setor === k ? "background:var(--accent);color:var(--on-accent)" : "background:none"}" data-action="count-setor" data-s="${k}" aria-pressed="${setor === k}">${n}${c ? ` <small>(${c})</small>` : ""}</button>`; }).join("")}</div>
-    <div class="srow" style="margin-bottom:8px"><input id="countSearch" type="search" placeholder="Procurar produto" value="${esc(S.countQ)}" autocomplete="off" aria-label="Procurar produto a contar"></div>`;
+    <p class="lead">Escreva o que encontrar de cada produto, em qualquer sítio: a app soma ao que já está contado (ex.: 10 águas na cozinha e mais 10 no armazém = 20). Bebidas e embalados às unidades (garrafas, barris, latas); uma garrafa aberta conta a parte que tem: <b>1,5</b> = uma cheia e meia. Comida a granel ao kg. Enganou-se? <b>↶</b> tira a última soma.</p>
+    <div class="srow" style="margin-bottom:8px"><input id="countSearch" type="search" placeholder="Procurar produto" value="${esc(S.countQ)}" autocomplete="off" aria-label="Procurar produto a contar"></div>
+    <p class="muted" style="margin:0 0 4px"><small>${contados} ${contados === 1 ? "produto contado" : "produtos contados"} de ${S.products.length}</small></p>`;
   const q = norm(S.countQ);
-  // no armazém aparecem todos os produtos; nos sítios, os desse sítio
-  const naLista = p => setor === "armazem" || !(p.setores || []).length || p.setores.includes(setor);
-  const list = S.products.filter(p => naLista(p) && (!q || norm(p.nome).includes(q))).sort((a, b) => catOrd(a) - catOrd(b) || a.nome.localeCompare(b.nome, "pt"));
+  const list = S.products.filter(p => !q || norm(p.nome).includes(q)).sort((a, b) => catOrd(a) - catOrd(b) || a.nome.localeCompare(b.nome, "pt"));
   let cat = null, open = false;
   for (const p of list) {
     if (p.categoria !== cat) { if (open) h += `</div>`; cat = p.categoria; h += `<div class="cnthd">${esc(cat || "Outros")}</div><div class="slist">`; open = true; }
-    const v = countVal(p.id, setor);
     if (S.renaming === p.id) { h += `<div class="srow2" style="flex-wrap:wrap"><input id="rn-input" value="${esc(p.nome)}" aria-label="Novo nome de ${esc(p.nome)}" style="flex:1 1 180px" autocomplete="off"><button class="small primary" data-action="rn-save" data-p="${p.id}">Guardar</button><button class="small" data-action="rn-cancel">Cancelar</button></div>`; continue; }
-    h += `<div class="srow2"><div class="sn"><b>${esc(p.nome)}${isChefe() ? ` <button class="edit" data-action="rn-start" data-p="${p.id}" aria-label="Mudar o nome de ${esc(p.nome)}">✎</button>` : ""}</b><small>em ${esc(contarTxt(p))}${v !== null && contarOf(p).fator !== 1 ? ` <span class="cq" data-q="${p.id}">= ${esc(qFmt(v * contarOf(p).fator, p.unidade))}</span>` : ""}</small></div><input class="cin${v !== null ? " done" : ""}" data-p="${p.id}" value="${v !== null ? esc(num(v, 3)) : ""}" inputmode="decimal" placeholder="—" aria-label="Quantidade de ${esc(p.nome)} em ${esc(contarTxt(p))}"></div>`;
+    const ps = countParts(p.id), t = ps.length ? somaParts(ps) : null;
+    h += `<div class="srow2" data-row="${p.id}"><div class="sn"><b>${esc(p.nome)}${isChefe() ? ` <button class="edit" data-action="rn-start" data-p="${p.id}" aria-label="Mudar o nome de ${esc(p.nome)}">✎</button>` : ""}</b><small class="ci">${countRowInfo(p)}</small></div>`
+      + `<div class="cadd"><span class="ctot${t !== null ? " done" : ""}" aria-label="Total contado de ${esc(p.nome)}">${t !== null ? esc(num(t, 3)) : "—"}</span>`
+      + `<input class="cin" data-p="${p.id}" inputmode="decimal" enterkeyhint="done" placeholder="+" autocomplete="off" aria-label="Somar ${esc(p.nome)} em ${esc(contarTxt(p))}">`
+      + `<button class="cund" data-action="count-undo" data-p="${p.id}" aria-label="Tirar a última soma de ${esc(p.nome)}"${ps.length ? "" : " hidden"}>↶</button></div></div>`;
   }
   if (open) h += `</div>`;
   if (!list.length) h += `<p class="muted">Nenhum produto encontrado.</p>`;
-  if (isChefe()) h += `<div class="card stack" style="margin-top:14px"><b>Terminar</b><small class="muted">Ao fechar, o stock de cada produto contado passa a ser o que se contou (soma dos sítios). Os produtos não contados ficam com o valor calculado.</small>
+  if (isChefe()) h += `<div class="card stack" style="margin-top:14px"><b>Terminar</b><small class="muted">Ao fechar, o stock de cada produto contado passa a ser o total contado. Os produtos não contados ficam com o valor calculado.</small>
     <div class="row"><button class="primary" data-action="count-close">${S.confirmClose ? "Confirmar: fechar contagem" : "Fechar contagem"}</button><button class="small danger" data-action="count-cancel">${S.confirmCancel ? "Confirmar: apagar contagem" : "Apagar contagem"}</button></div></div>`;
   return h;
 }
@@ -1122,7 +1133,7 @@ document.addEventListener("click", async ev => {
     else if (a === "stock-f") { S.stockF = b.dataset.f; render(); }
     else if (a === "count-diff") { S.showDiff = !S.showDiff; render(); }
     else if (a === "count-go") { S.counting = true; S.countQ = ""; render(); window.scrollTo(0, 0); }
-    else if (a === "count-setor") { S.countSetor = b.dataset.s; render(); window.scrollTo(0, 0); }
+    else if (a === "count-undo") { await countUndo(b); }
     else if (a === "count-back") { S.counting = false; S.confirmClose = S.confirmCancel = false; await loadStock(); render(); window.scrollTo(0, 0); }
     else if (a === "count-start") { b.disabled = true; await rpc("compras_count_start", {p_token:S.token}); await loadStock(); S.counting = true; render(); window.scrollTo(0, 0); toast("Contagem aberta. Toda a equipa pode contar."); }
     else if (a === "count-close") {
@@ -1293,21 +1304,45 @@ document.addEventListener("change", ev => {
   if (t.dataset.ln != null && S.review) { const l = S.review.lines[+t.dataset.ln]; l[t.dataset.f] = t.type === "checkbox" ? t.checked : t.value; if (["productId","include","baseUnit"].includes(t.dataset.f)) render(); }
 });
 
-async function countSave(t){
+// soma o que se escreveu ao que já estava contado ("10" ou "10+5"); a base de dados guarda cada soma
+function countLinha(pid, l){
   const ab = S.count && S.count.aberta; if (!ab) return;
-  const raw = t.value.trim(); let v = raw === "" ? null : parseNum(raw);
-  if (v !== null && !(isFinite(v) && v >= 0)) { toast("Quantidade inválida."); t.value = ""; return; }
-  if (v !== null) v = Math.round(v * 1000) / 1000;
-  const pid = t.dataset.p, setor = S.countSetor || S.setor, f = contarOf(prodById(pid)).fator;
+  ab.linhas = (ab.linhas || []).filter(x => x.product_id !== pid);
+  if (l) ab.linhas.push(l);
+  const row = document.querySelector(`.srow2[data-row="${pid}"]`), p = prodById(pid);
+  if (!row || !p) { render(); return; }
+  const ps = countParts(pid), t = ps.length ? somaParts(ps) : null;
+  const tot = row.querySelector(".ctot"); tot.textContent = t !== null ? num(t, 3) : "—"; tot.classList.toggle("done", t !== null);
+  row.querySelector(".ci").innerHTML = countRowInfo(p);
+  row.querySelector(".cund").hidden = !ps.length;
+}
+let countFila = Promise.resolve();
+const emFila = fn => (countFila = countFila.then(fn, fn));
+function countSave(t){ return emFila(() => countSave1(t)); }
+function countUndo(b){ return emFila(() => countUndo1(b)); }
+async function countSave1(t){
+  const ab = S.count && S.count.aberta; if (!ab || t.disabled) return;
+  const raw = t.value.trim(); if (raw === "") return;
+  const partes = raw.split("+").map(x => x.trim()).filter(Boolean).map(parseNum);
+  let v = partes.reduce((a, b) => a + b, 0);
+  if (!partes.length || partes.some(x => !isFinite(x)) || !isFinite(v) || v === 0) { toast("Quantidade inválida."); t.value = ""; return; }
+  v = Math.round(v * 1000) / 1000;
+  const pid = t.dataset.p;
+  if (somaParts(countParts(pid)) + v < 0) { toast("O total não pode ficar negativo."); t.value = ""; return; }
+  t.disabled = true;
   try {
-    // p_unidades: a quantidade vai na forma de contar (garrafas, barris...); a base de dados converte
-    await rpc("compras_count_set", {p_token:S.token, p_count:ab.id, p_product:pid, p_setor:setor, p_qty:v, p_unidades:true});
-    ab.linhas = (ab.linhas || []).filter(l => !(l.product_id === pid && l.setor === setor));
-    if (v !== null) ab.linhas.push({product_id:pid, setor, qty:v * f, contado:v, fator:f, por:S.me.nome});
-    t.classList.toggle("done", v !== null);
-    const row = t.closest(".srow2"), p = prodById(pid);
-    if (row && p && f !== 1) { const sm = row.querySelector(".sn small"); if (sm) sm.innerHTML = "em " + esc(contarTxt(p)) + (v !== null ? ` <span class="cq">= ${esc(qFmt(v * f, p.unidade))}</span>` : ""); }
+    const l = await rpc("compras_count_add", {p_token:S.token, p_count:ab.id, p_product:pid, p_qty:v});
+    t.value = ""; countLinha(pid, l);
+    const p = prodById(pid); toast(`+${num(v, 3)} ${p ? p.nome : ""} · total ${num(somaParts(countParts(pid)), 3)}`);
   } catch(e){ toast(e.message === "contagem_fechada" ? "A contagem já foi fechada." : "Não gravou. Tente outra vez."); }
+  t.disabled = false;
+}
+async function countUndo1(b){
+  const ab = S.count && S.count.aberta; if (!ab) return;
+  const pid = b.dataset.p; b.disabled = true;
+  try { countLinha(pid, await rpc("compras_count_undo", {p_token:S.token, p_count:ab.id, p_product:pid})); }
+  catch(e){ toast(e.message === "contagem_fechada" ? "A contagem já foi fechada." : "Não gravou. Tente outra vez."); }
+  b.disabled = false;
 }
 function fillRecent(){ const d = document.getElementById("recentSearches"); if (d) d.innerHTML = ls.get("cf_recent", []).map(x => `<option value="${esc(x)}">`).join(""); }
 fillRecent();

@@ -3559,3 +3559,76 @@ begin
   end if;
   if d2 <> d then execute d2; end if;
 end $$;
+
+-- ===================== Contagem sem sítios, com somas (19/11) =====================
+-- Uma lista só; cada vez que se escreve uma quantidade soma-se ao que já estava (10 águas na cozinha + 10 no armazém = 20).
+-- Cada soma fica em parcelas (na forma de contar); a linha fica no "sítio" 'geral'; ↶ tira a última.
+alter table public.compras_stock_count_lines add column if not exists parcelas numeric[];
+
+create or replace function public.compras__count_estado(p_count uuid, p_product uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object('product_id', p_product, 'setor', 'geral', 'qty', l.qty, 'contado', l.contado, 'fator', l.fator, 'parcelas', to_jsonb(l.parcelas),
+           'por', (select nome from public.compras_users where id = l.updated_by), 'em', l.updated_at)
+    from public.compras_stock_count_lines l where l.count_id = p_count and l.product_id = p_product and l.setor = 'geral'
+$$;
+revoke all on function public.compras__count_estado(uuid, uuid) from public, anon, authenticated;
+
+create or replace function public.compras_count_add(p_token text, p_count uuid, p_product uuid, p_qty numeric)
+returns jsonb language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; f numeric; ant numeric[]; tot numeric;
+begin
+  u := public.compras__user(p_token);
+  perform 1 from public.compras_stock_counts where id = p_count and fechada_em is null for update;
+  if not found then raise exception 'contagem_fechada'; end if;
+  if p_qty is null or p_qty = 0 or abs(p_qty) > 100000 then raise exception 'quantidade_invalida'; end if;
+  if not exists (select 1 from public.compras_products where id = p_product) then raise exception 'produto_nao_existe'; end if;
+  f := coalesce(nullif((public.compras__contar(p_product)->>'fator')::numeric, 0), 1);
+  select coalesce(array_agg(x order by o), '{}') into ant from (
+    select l.updated_at o, unnest(case when l.parcelas is not null then l.parcelas
+                                       when l.contado is not null and coalesce(l.fator, 1) = f then array[l.contado]
+                                       else array[round(l.qty / f, 3)] end) x
+      from public.compras_stock_count_lines l where l.count_id = p_count and l.product_id = p_product) t;
+  ant := ant || round(p_qty, 3);
+  select sum(v) into tot from unnest(ant) v;
+  if tot < 0 then raise exception 'quantidade_invalida'; end if;
+  delete from public.compras_stock_count_lines where count_id = p_count and product_id = p_product;
+  insert into public.compras_stock_count_lines (count_id, product_id, setor, qty, contado, fator, parcelas, updated_by, updated_at)
+  values (p_count, p_product, 'geral', tot * f, tot, f, ant, u.id, now());
+  return public.compras__count_estado(p_count, p_product);
+end $function$;
+grant execute on function public.compras_count_add(text, uuid, uuid, numeric) to anon, authenticated;
+
+create or replace function public.compras_count_undo(p_token text, p_count uuid, p_product uuid)
+returns jsonb language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; l public.compras_stock_count_lines; ps numeric[]; tot numeric;
+begin
+  u := public.compras__user(p_token);
+  perform 1 from public.compras_stock_counts where id = p_count and fechada_em is null for update;
+  if not found then raise exception 'contagem_fechada'; end if;
+  select * into l from public.compras_stock_count_lines where count_id = p_count and product_id = p_product and setor = 'geral';
+  if not found or coalesce(array_length(l.parcelas, 1), 0) <= 1 then
+    delete from public.compras_stock_count_lines where count_id = p_count and product_id = p_product;
+    return null;
+  end if;
+  ps := l.parcelas[1:array_length(l.parcelas, 1) - 1];
+  select sum(v) into tot from unnest(ps) v;
+  update public.compras_stock_count_lines set parcelas = ps, contado = tot, qty = tot * l.fator, updated_by = u.id, updated_at = now()
+   where count_id = p_count and product_id = p_product and setor = 'geral';
+  return public.compras__count_estado(p_count, p_product);
+end $function$;
+grant execute on function public.compras_count_undo(text, uuid, uuid) to anon, authenticated;
+
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras_count_get'::regproc);
+  if position('''parcelas''' in d) = 0 then
+    d2 := replace(d, '''fator'', l.fator,', '''fator'', l.fator, ''parcelas'', to_jsonb(l.parcelas),');
+    if d2 <> d then execute d2; end if;
+  end if;
+  d := pg_get_functiondef('public.compras_count_set'::regproc);
+  d2 := d;
+  if position('''geral''' in d2) = 0 then d2 := replace(d2, '''takeaway'',''armazem'')', '''takeaway'',''armazem'',''geral'')'); end if;
+  if position('parcelas = null' in d2) = 0 then d2 := replace(d2, 'fator = excluded.fator,', 'fator = excluded.fator, parcelas = null,'); end if;
+  if d2 <> d then execute d2; end if;
+end $$;

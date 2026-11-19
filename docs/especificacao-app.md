@@ -192,7 +192,7 @@ Obrigado.
 - O chefe vê também "N artigos vendidos no ZSbms ainda não têm receita, por isso não descontam stock."
 
 **Contagem (mensal):**
-- Qualquer pessoa pode **"Começar contagem"** e contar. Conta-se **por sítio** (Cozinha, Sushi, Bar, Take away e **Armazém**; o Armazém mostra todos os produtos), produto a produto, por categoria, e grava sozinho; o vazio quer dizer "não contado".
+- Qualquer pessoa pode **"Começar contagem"** e contar. É **uma lista só** com todos os produtos, por categoria, com pesquisa (sem sítios). Cada produto tem o total contado, um campo **+** e o botão **↶**: o que se escreve **soma-se** ao total (10 águas na cozinha + 10 no armazém = 20; aceita "5+3"); ↶ tira a última soma. Grava sozinho; "—" quer dizer "não contado". Mostra "N produtos contados de M".
 - Cada produto conta-se na sua **forma de contar**: bebidas em garrafas, barris, latas ou embalagens com o volume do nome ou da embalagem ("em garrafas de 0,7 L", "em barris de 50 L"), o resto na unidade do produto (kg, un). Aceita decimais (garrafa aberta a meio = 1,5) e mostra o total ("= 1,05 L").
 - Recomendação: contar tudo de uma vez, incluindo o armazém, de manhã antes de abrir ou à noite depois de fechar.
 - O chefe pode corrigir o nome de um produto durante a contagem (✎).
