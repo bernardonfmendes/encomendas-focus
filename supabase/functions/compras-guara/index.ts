@@ -9,6 +9,7 @@
 // { "modo": "receitas" } lê as primeiras páginas da lista de receitas (as mexidas há menos tempo), abre cada uma e grava
 //   as novas e as que mudaram (nome, rendimento, PVP ou ingredientes) com compras__import_recipes (nunca apaga receitas).
 // { "modo": "releitura", "pag_de", "pag_ate", "desde" } lê faturas antigas para compras_guara_releitura (ver a função).
+// { "modo": "lista", "pag_de", "pag_ate" } devolve só a lista de faturas dessas páginas (fornecedor, número, datas, totais, estado das linhas).
 // "ensaio": true devolve o que leu e não grava nada. "ver" / "padrao" servem só para diagnóstico.
 const BASE = "https://guara.pt";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
@@ -364,6 +365,12 @@ Deno.serve(async (req: Request) => {
     if (modo === "faturas") return json(await faturas(s, b));
     if (modo === "receitas") return json(await receitas(s, b));
     if (modo === "releitura") return json(await releitura(s, b));
+    // { "modo": "lista", "pag_de": 61, "pag_ate": 120 }: só a lista de faturas dessas páginas, sem abrir nenhuma
+    if (modo === "lista") {
+      const de = Math.max(1, Number(b?.pag_de) || 1), ate = Math.max(de, Math.min(Number(b?.pag_ate) || de, de + 79));
+      const l = (await lerPaginas(s, de, ate)).sort((x, y) => y.data.localeCompare(x.data));
+      return json({ ok: true, paginas: [de, ate], n: l.length, faturas: l });
+    }
     if (modo === "ver" || modo === "padrao") {
       const path = String(b.path || "/");
       if (!/^\/[A-Za-z0-9_\-\/?=&%.]*$/.test(path) || /log_out|delete|remove|apagar/i.test(path)) return json({ error: "caminho_nao_permitido" }, 400);
