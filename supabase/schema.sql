@@ -3285,3 +3285,277 @@ begin
     execute d2;
   end if;
 end $$;
+
+-- ===================== Fornecedores com outros nomes e juntar fornecedores (19/11) =====================
+-- Ex.: "CONTINENTE" e "MAKRO" são o fornecedor "Bernardo Mendes" (o dono vai comprar); "Genialis, Lda" é "Genialis".
+create table if not exists public.compras_supplier_nomes (
+  chave text primary key,
+  supplier_id uuid not null references public.compras_suppliers(id) on delete cascade,
+  nome text not null,
+  criado_em timestamptz not null default now()
+);
+alter table public.compras_supplier_nomes enable row level security;
+
+create or replace function public.compras__fornecedor_chave(p text)
+returns text language sql immutable set search_path = public as $$
+  select lower(regexp_replace(translate(coalesce(p,''), 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN'), '[^A-Za-z0-9]', '', 'g'))
+$$;
+
+-- primeiro os outros nomes guardados (igual, começa por, ou contém com 6+ letras), depois a regra de sempre
+create or replace function public.compras__fornecedor(p_nome text)
+returns uuid language sql stable security definer set search_path to 'public', 'extensions' as $function$
+  with k as (select lower(regexp_replace(trim(coalesce(p_nome,'')), '[^A-Za-z0-9]', '', 'g')) nk),
+  al as (select n.supplier_id from public.compras_supplier_nomes n, k
+          where k.nk <> '' and (n.chave = k.nk or n.chave = public.compras__fornecedor_chave(p_nome)
+             or (length(n.chave) >= 4 and k.nk like n.chave || '%')
+             or (length(n.chave) >= 6 and k.nk like '%' || n.chave || '%')) limit 1),
+  s as (select id, created_at, lower(regexp_replace(nome, '[^A-Za-z0-9]', '', 'g')) sk from public.compras_suppliers)
+  select coalesce((select supplier_id from al), (
+  select s.id from s, k
+   where k.nk <> '' and s.sk <> '' and (s.sk = k.nk
+      or (length(k.nk) >= 4 and s.sk like k.nk || '%')
+      or (length(s.sk) >= 4 and k.nk like s.sk || '%')
+      or (length(k.nk) >= 6 and s.sk like '%' || k.nk || '%')
+      or (length(s.sk) >= 6 and k.nk like '%' || s.sk || '%'))
+   order by case when s.sk = k.nk then 0 when s.sk like k.nk || '%' or k.nk like s.sk || '%' then 1 else 2 end, s.created_at
+   limit 1))
+$function$;
+
+-- Juntar dois fornecedores: tudo do p_from passa para p_into; o nome do p_from fica como outro nome do p_into.
+create or replace function public.compras__merge_suppliers(p_from uuid, p_into uuid)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare f public.compras_suppliers; o public.compras_offers; cur public.compras_offers; n_of int := 0;
+begin
+  if p_from = p_into then return jsonb_build_object('igual', true); end if;
+  select * into f from public.compras_suppliers where id = p_from;
+  if not found then raise exception 'fornecedor_nao_existe'; end if;
+  perform 1 from public.compras_suppliers where id = p_into; if not found then raise exception 'fornecedor_nao_existe'; end if;
+  insert into public.compras_offer_aliases (supplier_id, alias, product_id, pack_qty, origem, atualizado_em)
+    select p_into, a.alias, a.product_id, a.pack_qty, coalesce(a.origem, 'juntar'), a.atualizado_em from public.compras_offer_aliases a where a.supplier_id = p_from
+    on conflict (supplier_id, alias) do nothing;
+  delete from public.compras_offer_aliases where supplier_id = p_from;
+  for o in select * from public.compras_offers where supplier_id = p_from loop
+    if coalesce(o.alias, '') <> '' then
+      insert into public.compras_offer_aliases (supplier_id, alias, product_id, pack_qty, origem)
+      values (p_into, lower(o.alias), o.product_id, o.pack_qty, 'juntar') on conflict (supplier_id, alias) do nothing;
+    end if;
+    select * into cur from public.compras_offers where product_id = o.product_id and supplier_id = p_into;
+    if not found then
+      update public.compras_offers set supplier_id = p_into where product_id = o.product_id and supplier_id = p_from;
+    else
+      if coalesce(cur.alias, '') <> '' then
+        insert into public.compras_offer_aliases (supplier_id, alias, product_id, pack_qty, origem)
+        values (p_into, lower(cur.alias), cur.product_id, cur.pack_qty, 'juntar') on conflict (supplier_id, alias) do nothing;
+      end if;
+      if coalesce(o.data, '1900-01-01'::date) > coalesce(cur.data, '1900-01-01'::date) then
+        update public.compras_offers set alias = o.alias, codigo = o.codigo, pack_qty = o.pack_qty, pack_price = o.pack_price, unit_price = o.unit_price,
+          prev_unit_price = cur.unit_price, prev_data = cur.data, data = o.data, invoice_id = o.invoice_id,
+          nome_encomenda = coalesce(nullif(cur.nome_encomenda, ''), o.nome_encomenda)
+         where product_id = o.product_id and supplier_id = p_into;
+      end if;
+      delete from public.compras_offers where product_id = o.product_id and supplier_id = p_from;
+    end if;
+    n_of := n_of + 1;
+  end loop;
+  update public.compras_price_history set supplier_id = p_into where supplier_id = p_from;
+  update public.compras_invoices set supplier_id = p_into where supplier_id = p_from;
+  update public.compras_orders set supplier_id = p_into where supplier_id = p_from;
+  update public.compras_suppliers s set nif = case when coalesce(s.nif,'') = '' then coalesce(f.nif,'') else s.nif end,
+    telefone = case when coalesce(s.telefone,'') = '' then coalesce(f.telefone,'') else s.telefone end,
+    dias = case when coalesce(s.dias,'') = '' then coalesce(f.dias,'') else s.dias end,
+    minimo = coalesce(s.minimo, f.minimo),
+    mensagem = case when coalesce(s.mensagem,'') = '' then coalesce(f.mensagem,'') else s.mensagem end
+   where s.id = p_into;
+  update public.compras_supplier_nomes set supplier_id = p_into where supplier_id = p_from;
+  insert into public.compras_supplier_nomes (chave, supplier_id, nome) values (public.compras__fornecedor_chave(f.nome), p_into, f.nome)
+    on conflict (chave) do update set supplier_id = excluded.supplier_id;
+  delete from public.compras_suppliers where id = p_from;
+  return jsonb_build_object('ofertas', n_of, 'de', f.nome);
+end $$;
+revoke all on function public.compras__merge_suppliers(uuid, uuid) from public, anon, authenticated;
+
+-- Gravar fatura sem fornecedor escolhido: antes de criar um fornecedor novo, procura pelos outros nomes e pelo nome sem "Lda", "S.A."
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras__save_invoice'::regproc);
+  if position('compras_supplier_nomes' in d) = 0 then
+    d2 := replace(d, '  if sid is null then
+    insert into public.compras_suppliers (nome, nif)',
+'  if sid is null and coalesce(trim(p_inv->>''fornecedor_nome''), '''') <> '''' then
+    select n.supplier_id into sid from public.compras_supplier_nomes n where n.chave = public.compras__fornecedor_chave(p_inv->>''fornecedor_nome'')
+        or (length(n.chave) >= 4 and public.compras__fornecedor_chave(p_inv->>''fornecedor_nome'') like n.chave || ''%'')
+     order by length(n.chave) desc limit 1;
+    if sid is null then
+      select s.id into sid from public.compras_suppliers s
+       where public.compras__fornecedor_chave(regexp_replace(s.nome, ''[,.]?\s*(lda|limitada|s\.?\s*a|unipessoal|unip)\.?\s*$'', '''', ''i''))
+           = public.compras__fornecedor_chave(regexp_replace(p_inv->>''fornecedor_nome'', ''[,.]?\s*(lda|limitada|s\.?\s*a|unipessoal|unip)\.?\s*$'', '''', ''i''))
+       order by s.created_at limit 1;
+    end if;
+  end if;
+  if sid is null then
+    insert into public.compras_suppliers (nome, nif)');
+    if d2 <> d then execute d2; end if;
+  end if;
+end $$;
+
+-- Entregas por semana de cada fornecedor (escrito em Gestão; vazio = estimado pelas faturas) e texto extra/entregas no gravar fornecedor
+alter table public.compras_suppliers add column if not exists entregas_semana numeric;
+drop function if exists public.compras_save_supplier(text, uuid, text, text, text, text, numeric, text, text);
+create or replace function public.compras_save_supplier(p_token text, p_id uuid, p_nome text, p_telefone text, p_dias text, p_nif text,
+  p_minimo numeric default null, p_via text default null, p_mensagem text default null, p_entregas numeric default null)
+returns uuid language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; rid uuid; v_via text := case when p_via in ('numero','grupo') then p_via end;
+begin
+  u := public.compras__chefe(p_token);
+  if coalesce(trim(p_nome),'') = '' then raise exception 'nome_obrigatorio'; end if;
+  if p_minimo is not null and p_minimo < 0 then raise exception 'preco_invalido'; end if;
+  if p_entregas is not null and (p_entregas < 0 or p_entregas > 14) then raise exception 'preco_invalido'; end if;
+  if p_id is null then
+    insert into public.compras_suppliers (nome, telefone, dias, nif, minimo, via, mensagem, entregas_semana)
+    values (trim(p_nome), coalesce(trim(p_telefone),''), coalesce(trim(p_dias),''), regexp_replace(coalesce(p_nif,''),'\D','','g'),
+            nullif(p_minimo, 0), coalesce(v_via, 'numero'), left(coalesce(trim(p_mensagem), ''), 300), nullif(p_entregas, 0))
+    returning id into rid;
+  else
+    update public.compras_suppliers set nome = trim(p_nome), telefone = coalesce(trim(p_telefone),''), dias = coalesce(trim(p_dias),''),
+      nif = regexp_replace(coalesce(p_nif,''),'\D','','g'), minimo = case when p_minimo is null then minimo else nullif(p_minimo, 0) end,
+      via = coalesce(v_via, via), mensagem = case when p_mensagem is null then mensagem else left(trim(p_mensagem), 300) end,
+      entregas_semana = case when p_entregas is null then entregas_semana else nullif(p_entregas, 0) end
+    where id = p_id returning id into rid;
+  end if;
+  return rid;
+end $function$;
+grant execute on function public.compras_save_supplier(text, uuid, text, text, text, text, numeric, text, text, numeric) to anon, authenticated;
+
+-- ===================== Contagem em garrafas/barris/un, armazém, data certa, ritmo de entradas (19/11) =====================
+alter table public.compras_products add column if not exists contar_em text, add column if not exists contar_fator numeric;
+alter table public.compras_stock_count_lines add column if not exists contado numeric, add column if not exists fator numeric not null default 1;
+
+-- Forma de contar: o que se conta na prateleira e quantas unidades do produto vale cada um (contar_em/contar_fator mandam se existirem;
+-- senão, produtos em L contam-se em garrafas/barris/latas/embalagens com o volume do nome ou da embalagem; o resto na unidade do produto)
+create or replace function public.compras__contar(p_id uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  with p as (select * from public.compras_products where id = p_id),
+  o as (select o.pack_qty from public.compras_offers o where o.product_id = p_id order by o.data desc nulls last limit 1),
+  nm as (select regexp_match(p.nome, '([0-9]+(?:[.,][0-9]+)?)\s*(l|lt|cl|ml)\y', 'i') m from p),
+  v as (select coalesce(
+          (select case when lower(nm.m[2]) = 'cl' then replace(nm.m[1], ',', '.')::numeric / 100
+                       when lower(nm.m[2]) = 'ml' then replace(nm.m[1], ',', '.')::numeric / 1000
+                       else replace(nm.m[1], ',', '.')::numeric end from nm where nm.m is not null),
+          (select o.pack_qty from o where o.pack_qty > 0 and o.pack_qty <= 60)) vol)
+  select case
+    when p.contar_em is not null and p.contar_fator > 0 then jsonb_build_object('em', p.contar_em, 'fator', p.contar_fator)
+    when p.unidade = 'L' and (select vol from v) > 0 then
+      jsonb_build_object('em', case when p.nome ~* 'barril' then 'barril' when p.nome ~* 'lata' then 'lata' when (select vol from v) >= 5 then 'embalagem' else 'garrafa' end,
+                         'fator', (select vol from v))
+    else jsonb_build_object('em', p.unidade, 'fator', 1) end
+  from p
+$$;
+revoke all on function public.compras__contar(uuid) from public, anon, authenticated;
+
+-- p_unidades = true: p_qty vem na forma de contar (ex.: 1,5 garrafas) e grava-se qty = p_qty × fator; sítios + armazém
+drop function if exists public.compras_count_set(text, uuid, uuid, text, numeric);
+create or replace function public.compras_count_set(p_token text, p_count uuid, p_product uuid, p_setor text, p_qty numeric, p_unidades boolean default false)
+returns void language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users; f numeric := 1;
+begin
+  u := public.compras__user(p_token);
+  if not exists (select 1 from public.compras_stock_counts where id = p_count and fechada_em is null) then raise exception 'contagem_fechada'; end if;
+  if p_setor not in ('cozinha','sushi','bar','takeaway','armazem') then raise exception 'setor_invalido'; end if;
+  if p_qty is null then
+    delete from public.compras_stock_count_lines where count_id = p_count and product_id = p_product and setor = p_setor;
+  else
+    if p_qty < 0 then raise exception 'quantidade_invalida'; end if;
+    if p_unidades then f := coalesce(nullif((public.compras__contar(p_product)->>'fator')::numeric, 0), 1); end if;
+    insert into public.compras_stock_count_lines (count_id, product_id, setor, qty, contado, fator, updated_by, updated_at)
+    values (p_count, p_product, p_setor, p_qty * f, case when p_unidades then p_qty end, f, u.id, now())
+    on conflict (count_id, product_id, setor) do update set qty = excluded.qty, contado = excluded.contado, fator = excluded.fator, updated_by = excluded.updated_by, updated_at = now();
+  end if;
+end $function$;
+grant execute on function public.compras_count_set(text, uuid, uuid, text, numeric, boolean) to anon, authenticated;
+
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras_count_get'::regproc);
+  if position('''contado'', l.contado' in d) = 0 then
+    d2 := replace(d, '''qty'', l.qty,', '''qty'', l.qty, ''contado'', l.contado, ''fator'', l.fator,');
+    if d2 <> d then execute d2; end if;
+  end if;
+end $$;
+
+-- Stock: um produto contado conta a partir do momento em que foi contado. Vendas: contado antes das 17h entram as desse dia,
+-- depois só as do dia seguinte. Faturas: contado antes das 10h entram as desse dia.
+create or replace function public.compras__stock_rows()
+returns table(product_id uuid, base date, base_q numeric, contado boolean, entradas numeric, saidas numeric, stock numeric, consumo_dia numeric)
+language sql stable set search_path to 'public' as $function$
+  with ini as (select coalesce((select stock_inicio from public.compras_settings where id = 1), current_date) d),
+  lastc as (
+    select distinct on (l.product_id) l.product_id, c.id cid
+      from public.compras_stock_count_lines l join public.compras_stock_counts c on c.id = l.count_id
+     where c.fechada_em is not null order by l.product_id, c.created_at desc),
+  lc as (select lastc.product_id, x.q, x.t
+           from lastc, lateral (select sum(y.qty) q, max(y.updated_at at time zone 'Europe/Lisbon') t
+                                  from public.compras_stock_count_lines y where y.count_id = lastc.cid and y.product_id = lastc.product_id) x),
+  cons as materialized (select * from public.compras__consumption()),
+  win as (select max(dia) mx, greatest(1, count(distinct dia) filter (where dia > (select max(dia) from public.compras_sales) - 28)) nd from public.compras_sales),
+  b as (select p.id, coalesce(lc.t::date, (select d from ini)) base, coalesce(lc.q, 0) base_q, lc.t is not null contado,
+          case when lc.t is null then (select d from ini) when lc.t::time < time '17:00' then lc.t::date else lc.t::date + 1 end cons_desde,
+          case when lc.t is null then (select d from ini) when lc.t::time < time '10:00' then lc.t::date else lc.t::date + 1 end entr_desde
+          from public.compras_products p left join lc on lc.product_id = p.id)
+  select b.id, b.base, b.base_q, b.contado, coalesce(e.q, 0), coalesce(s.q, 0), b.base_q + coalesce(e.q, 0) - coalesce(s.q, 0), coalesce(c.q, 0) / (select nd from win)
+    from b
+    left join lateral (select sum(pl.qty) q from public.compras_purchase_lines pl where pl.product_id = b.id and pl.data >= b.entr_desde) e on true
+    left join lateral (select sum(cons.qty) q from cons where cons.product_id = b.id and cons.dia >= b.cons_desde) s on true
+    left join lateral (select sum(cons.qty) q from cons where cons.product_id = b.id and cons.dia > (select mx from win) - 28) c on true
+$function$;
+
+-- Quanto entra por semana (últimas 4 semanas) e quantas vezes por semana entrega o fornecedor da última compra
+drop function if exists public.compras__entradas_freq();
+create or replace function public.compras__entradas_freq()
+returns table(product_id uuid, entra_semana numeric, entregas_semana numeric, ultima_entrega date, supplier_id uuid)
+language sql stable set search_path to 'public' as $$
+  with pl as (select pl.product_id, pl.qty, pl.data, i.supplier_id from public.compras_purchase_lines pl join public.compras_invoices i on i.id = pl.invoice_id where pl.qty > 0),
+  est as (select i.supplier_id, round(count(distinct i.data)::numeric / 4, 2) ent from public.compras_invoices i
+           where i.data > current_date - 28 and coalesce(i.total, 0) >= 0 group by 1),
+  ult as (select distinct on (pl.product_id) pl.product_id, pl.supplier_id, pl.data from pl order by pl.product_id, pl.data desc),
+  ent as (select pl.product_id, round(sum(pl.qty) / 4, 3) q from pl where pl.data > current_date - 28 group by 1)
+  select u.product_id, e.q, coalesce(sp.entregas_semana, s.ent), u.data, u.supplier_id
+    from ult u left join ent e on e.product_id = u.product_id left join est s on s.supplier_id = u.supplier_id
+    left join public.compras_suppliers sp on sp.id = u.supplier_id
+$$;
+
+create or replace function public.compras_stock(p_token text)
+returns jsonb language plpgsql security definer set search_path to 'public', 'extensions' as $function$
+declare u public.compras_users;
+begin
+  u := public.compras__user(p_token);
+  return jsonb_build_object(
+    'inicio', (select stock_inicio from public.compras_settings where id = 1),
+    'vendas_ate', (select max(dia) from public.compras_sales),
+    'vendas_desde', (select min(dia) from public.compras_sales),
+    'sem_receita', (select count(*) from public.compras_zs_items z where not z.ignorar and z.recipe_guara_id is null and z.product_id is null
+                      and exists (select 1 from public.compras_sales s where s.codigo = z.codigo and s.dia > current_date - 35)),
+    'contagem_aberta', (select c.id from public.compras_stock_counts c where c.fechada_em is null),
+    'ultima_contagem', (select max(fechada_em) from public.compras_stock_counts),
+    'produtos', coalesce((select jsonb_agg(jsonb_build_object('id', r.product_id, 'base', r.base, 'base_q', round(r.base_q, 3), 'contado', r.contado,
+                 'entradas', round(r.entradas, 3), 'saidas', round(r.saidas, 3), 'stock', round(r.stock, 3), 'consumo_dia', round(r.consumo_dia, 4),
+                 'entra_semana', f.entra_semana, 'entregas_semana', f.entregas_semana, 'ultima_entrega', f.ultima_entrega))
+                 from public.compras__stock_rows() r left join public.compras__entradas_freq() f on f.product_id = r.product_id
+                where r.entradas <> 0 or r.saidas <> 0 or r.contado or r.consumo_dia <> 0 or f.entra_semana is not null), '[]'::jsonb));
+end $function$;
+
+-- O catálogo leva a forma de contar de cada produto e as entregas por semana de cada fornecedor
+do $$
+declare d text; d2 text;
+begin
+  d := pg_get_functiondef('public.compras_catalog'::regproc);
+  d2 := d;
+  if position('compras__contar' in d2) = 0 then
+    d2 := replace(d2, '''setores'', to_jsonb(p.setores),', '''setores'', to_jsonb(p.setores), ''contar'', public.compras__contar(p.id),');
+  end if;
+  if position('''entregas_semana'', s.entregas_semana' in d2) = 0 then
+    d2 := replace(d2, '''mensagem'', s.mensagem)', '''mensagem'', s.mensagem, ''entregas_semana'', s.entregas_semana)');
+  end if;
+  if d2 <> d then execute d2; end if;
+end $$;

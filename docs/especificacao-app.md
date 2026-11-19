@@ -185,12 +185,16 @@ Obrigado.
 
 - Frase do topo: "Faturas que entraram menos o que se gastou nas vendas (receitas do Guará). Vendas até 17/11/26."
 - **Stock = última contagem (ou 0 na data de início) + compras das faturas − consumo** (vendas do ZSbms × ingredientes das receitas). Consumo por dia = média das últimas 4 semanas com vendas.
-- Procura e filtros: **Todos** (por categoria), **A acabar** (dá para menos de 4 dias ou acabou) e **Sem vendas**.
-- Cada linha mostra nome, "gasta ~8 kg/semana · dá para 3 dias · contado 01/11/26" e a quantidade (vermelho se negativa, amarelo se a acabar).
+- Um produto contado conta a partir do momento da contagem: as vendas desse dia entram se foi contado antes das 17h, as faturas desse dia se foi contado antes das 10h.
+- **Ritmo:** quanto entra por semana (faturas das últimas 4 semanas) e quantas vezes por semana entrega o fornecedor da última compra ("Entregas por semana" em Gestão › Fornecedores; vazio = estimado pelas faturas).
+- Procura e filtros: **Todos** (por categoria), **A acabar** (o stock não chega até à próxima entrega + 1 dia, ou acabou) e **Sem vendas**.
+- Cada linha mostra nome, "gasta ~1,2 L/dia · entra ~6 L/semana · vem ~1×/semana · contado 18/11/26", a quantidade (vermelho se negativa, amarelo se a acabar) e, para bebidas, o equivalente em garrafas/barris ("≈ 3,5 garrafas").
 - O chefe vê também "N artigos vendidos no ZSbms ainda não têm receita, por isso não descontam stock."
 
 **Contagem (mensal):**
-- Qualquer pessoa pode **"Começar contagem"** e contar. Conta-se **por sítio** (Cozinha, Sushi, Bar, Take away), produto a produto, por categoria, e grava sozinho; o vazio quer dizer "não contado".
+- Qualquer pessoa pode **"Começar contagem"** e contar. Conta-se **por sítio** (Cozinha, Sushi, Bar, Take away e **Armazém**; o Armazém mostra todos os produtos), produto a produto, por categoria, e grava sozinho; o vazio quer dizer "não contado".
+- Cada produto conta-se na sua **forma de contar**: bebidas em garrafas, barris, latas ou embalagens com o volume do nome ou da embalagem ("em garrafas de 0,7 L", "em barris de 50 L"), o resto na unidade do produto (kg, un). Aceita decimais (garrafa aberta a meio = 1,5) e mostra o total ("= 1,05 L").
+- Recomendação: contar tudo de uma vez, incluindo o armazém, de manhã antes de abrir ou à noite depois de fechar.
 - O chefe pode corrigir o nome de um produto durante a contagem (✎).
 - O chefe **fecha a contagem**: o stock de cada produto contado passa a ser a soma contada nos sítios, e os não contados ficam com o valor calculado. O chefe também pode apagar a contagem.
 - Depois aparece "Última contagem: 01/11/26 · Ver diferenças", com o contado menos o esperado (negativo = faltou: quebras, porções maiores, vendas sem receita).
@@ -220,7 +224,8 @@ Três abas (segmentado): **Preços** · **Ler faturas (N)** · **Histórico**.
 
 - **Restaurante:** nome, que aparece nas mensagens.
 - **Equipa:** nome, perfil (colaborador/chefe), sítio e novo PIN opcional; desativar ou reativar; "Adicionar pessoa" com "Gerar PIN" (6 números ao acaso). Ninguém pode tirar a si próprio o acesso de chefe.
-- **Fornecedores:** nome, WhatsApp, dias de encomenda/entrega (texto livre), NIF, mínimo de entrega (€ sem IVA), "Encomendas por" (número ou grupo de WhatsApp) e "Texto extra na mensagem" (ex.: "Nif: 515750115").
+- **Fornecedores:** nome, WhatsApp, dias de encomenda/entrega (texto livre), NIF, mínimo de entrega (€ sem IVA), "Encomendas por" (número ou grupo de WhatsApp), "Texto extra na mensagem" (ex.: "Nif: 515750115") e "Entregas por semana" (para o aviso "a acabar").
+- O Continente e a Makro são um só fornecedor, "Bernardo Mendes" (é o dono que vai comprar): as faturas com esses nomes entram nele.
 - **Produtos:** procura (ou "sem preço"), corrigir nome, categoria e unidade, **"Juntar com"** (dois produtos que são o mesmo passam a um só, com os preços de todos os fornecedores, as descrições das faturas, o nome na encomenda e a ligação às receitas) e apagar.
 
 ### 4.8 Sem rede, instalação e notificações
