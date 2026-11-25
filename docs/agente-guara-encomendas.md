@@ -2,7 +2,7 @@
 
 **O pedido do dono:** que a equipa passe a fazer as encomendas aos fornecedores **dentro do Guará**, como hoje faz na app "Compras", sem perder nenhuma das regras.
 
-Vai com este texto o ficheiro **`Encomendas - dados para o Guará.xlsx`**, com os fornecedores, os produtos de cada fornecedor e as formas de encomenda, tal como estão hoje na app.
+Vai com este texto o ficheiro **`Encomendas - dados para o Guará.xlsx`**, tal como estão hoje na app. Tem os fornecedores, os produtos de cada fornecedor, as formas de encomenda, a ligação dos produtos às receitas do Guará e a ligação dos artigos do POS às receitas.
 
 ---
 
@@ -51,7 +51,28 @@ Usa o que o Guará já tem; não cries um catálogo à parte.
 
 ---
 
-## 3. Quem faz o quê
+## 3. Os produtos já estão ligados às receitas
+
+- **No Guará, cada ingrediente de uma receita é um Produto do Guará** (ou uma sub-receita), ligado pelo número do produto.
+  - Os produtos a encomendar são esses mesmos produtos. Não crias produtos novos para as encomendas.
+  - Hoje há 645 receitas no Guará, com 3 506 ingredientes, dos quais 1 135 são sub-receitas.
+- **Nas receitas, os nomes são genéricos.** Por exemplo, "Refrigerante de cola" é a Pepsi e "Vinho branco da casa" é o Herdade da Candeeira branco.
+  - A folha **"Produtos e receitas"** do Excel liga 160 produtos da app ao nome que têm nas receitas do Guará.
+  - Usa-a para saber que produto do Guará corresponde a cada produto do Excel.
+- **Alguns produtos das receitas nunca vieram numa fatura lida.** Exemplos: sésamo branco, canela, cebola frita e sal grosso.
+  - Na app não têm produto nem preço. Estão na folha **"Ingredientes sem produto"**, com as notas do dono.
+  - Também se encomendam: pergunta ao dono a que fornecedor.
+- **As vendas ligam-se às receitas pelos artigos do POS (ZSbms).** São 314 artigos, na folha **"Artigos do POS"**:
+  - 235 ligados a uma receita, com um fator (ex.: "COMBINADO 48" = 1,5 × "Combinado 32 peças");
+  - 50 ligados a um produto vendido tal e qual (garrafas, latas, snacks);
+  - 29 ignorados: menus cujos componentes vêm em linhas próprias.
+- **Três receitas só existem na app:** a peça média de sushi do all you can eat, o galão e a meia de leite.
+- **Se o Guará já fizer a ligação das vendas às receitas** (por exemplo nos "Itens de ementa"), compara com esta folha e mostra ao dono as diferenças.
+- **Assim, o mesmo produto liga tudo:** encomenda → fatura → stock → receitas → vendas. É isto que permite, numa segunda fase, sugerir quantidades na encomenda (ver secção 8).
+
+---
+
+## 4. Quem faz o quê
 
 | Perfil | Pode |
 |---|---|
@@ -61,7 +82,7 @@ Usa o que o Guará já tem; não cries um catálogo à parte.
 
 ---
 
-## 4. Como funciona (igual à app de hoje)
+## 5. Como funciona (igual à app de hoje)
 
 **Encomendar** (no telemóvel):
 - **Topo:**
@@ -116,7 +137,7 @@ Usa o que o Guará já tem; não cries um catálogo à parte.
 
 ---
 
-## 5. Mensagem ao fornecedor
+## 6. Mensagem ao fornecedor
 
 As quantidades de vários sítios somam-se por produto. Exemplo:
 
@@ -142,7 +163,7 @@ Obrigado.
 
 ---
 
-## 6. Regras que não se podem perder
+## 7. Regras que não se podem perder
 
 1. **Preços sempre sem IVA** e por unidade: preço da embalagem ÷ quantidade da embalagem.
 2. **Uma forma diferente da original** só muda a encomenda: a linha vai **sem preço**, não se junta a linhas de outra forma e não mexe em faturas, preços nem stock. Não se usa peso aproximado.
@@ -158,15 +179,15 @@ Obrigado.
 
 ---
 
-## 7. Ganhos por estar dentro do Guará (propõe ao dono)
+## 8. Ganhos por estar dentro do Guará (propõe ao dono)
 
 - **Conferir a encomenda com a fatura:** quando a fatura do fornecedor entra, comparar com o que foi enviado (faltou, veio a mais, preço diferente do previsto) e avisar o chefe.
 - **Preço sempre atualizado** a partir das faturas, sem passo intermédio.
-- **Stock na encomenda:** a app atual mostra, em cada produto, "Stock 3,2 kg · gasta ~8 kg/semana · para 7 dias faltam ~4,8 kg" e avisa quando não chega até à próxima entrega. Precisa de stock (compras − vendas × receitas). Se o Guará ainda não o tiver, fica para uma segunda fase.
+- **Stock na encomenda:** a app atual mostra, em cada produto, "Stock 3,2 kg · gasta ~8 kg/semana · para 7 dias faltam ~4,8 kg" e avisa quando não chega até à próxima entrega. Os produtos, as receitas e as vendas já estão ligados (secção 3). Falta o stock no Guará: última contagem + compras − vendas × receitas. Fica para uma segunda fase, se o dono quiser.
 
 ---
 
-## 8. Como usar o Excel
+## 9. Como usar o Excel
 
 - **Folha "Fornecedores":** 35 fornecedores, com NIF, WhatsApp, por número ou grupo, mínimo, dias, entregas por semana, texto extra e outros nomes nas faturas. A maioria ainda não tem WhatsApp nem mínimo: pede ao dono.
 - **Folha "Produtos e fornecedores":** 382 linhas (319 produtos). Para cada produto e fornecedor tem:
@@ -177,11 +198,14 @@ Obrigado.
   - nome na encomenda e formas de encomenda ("(como está)" = a forma original);
   - outras descrições com que o artigo já apareceu nas faturas.
 - **Folha "Formas de encomenda":** as 12 formas criadas.
+- **Folha "Produtos e receitas":** 186 linhas. Cada uma é um produto da app, o nome desse produto nas receitas do Guará, em quantas receitas entra e quantas dessas se venderam nos últimos 30 dias.
+- **Folha "Ingredientes sem produto":** 259 ingredientes das receitas sem produto na app, com a nota do dono quando existe. Os que entram em pratos vendidos estão primeiro.
+- **Folha "Artigos do POS":** os 314 artigos do ZSbms. Cada um tem o código, a receita do Guará (número e nome) ou o produto, o fator, as peças, se é ignorado e quantos se venderam nos últimos 30 dias.
 - Os nomes dos produtos foram escolhidos pelo dono. Quando forem diferentes dos do Guará, mostra-lhe os dois e pergunta qual fica.
 
 ---
 
-## 9. Antes de pôr a equipa a usar (testes)
+## 10. Antes de pôr a equipa a usar (testes)
 
 Testa no telemóvel, com dados reais:
 1. Um colaborador do Sushi encomenda 2 produtos de 2 fornecedores: ficam 2 encomendas por confirmar, e o chefe recebe a notificação.
